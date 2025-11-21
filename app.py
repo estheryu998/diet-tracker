@@ -1,76 +1,96 @@
 # -*- coding: utf-8 -*-
 """
-单人生活方式记录工具（高颜值版）
-- 患者端：饮食 / 睡眠 / 排便 / 体重输入 + 本周汇总
-- 医生端：通过 URL 暗号进入 Dashboard，查看全时段趋势、导出 CSV
-- 保留原有 JSON 结构，兼容既有数据
+单人生活方式记录工具（Supabase 多用户版）
+
+- 患者端：通过“患者编号”登录，填写饮食 / 睡眠 / 排便 / 体重 / 运动
+- 本周汇总：自动汇总周一到周日的数据，计算总热量、平均睡眠等
+- 医生端：通过暗号进入 Dashboard，按患者编号查看所有记录、导出 CSV
+- 数据存储：Supabase 表 daily_records（每行=某患者某一天的记录）
+
+注意：
+1. 需要在 requirements.txt 中至少包含：
+   streamlit
+   supabase-py
+   pandas
+
+2. 需要在 Streamlit Secrets 中配置：
+   SUPABASE_URL, SUPABASE_ANON_KEY, （可选）DOCTOR_CODE
 """
+
+import os
+import datetime as dt
+from typing import Dict, Any, Optional, List
 
 import streamlit as st
 import pandas as pd
-import json
-import os
-import datetime as dt
-from typing import Dict, Any, Tuple
+from supabase import create_client, Client
 
 # ------------------- 基本配置 -------------------
-DATA_FILE = "diet_data.json"
-DOCTOR_CODE = "masld2025"  # 医生端暗号（?code=masld2025）
 
-BASE_FOOD_DB = {
+st.set_page_config(
+    page_title="单人生活方式记录工具",
+    page_icon="🩺",
+    layout="wide",
+)
+
+# 从 secrets 读取 Supabase 配置
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
+DOCTOR_CODE = st.secrets.get("DOCTOR_CODE", "doctor2025")  # 可在 secrets 中覆盖
+
+@st.cache_resource(show_spinner=False)
+def get_supabase_client() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+supabase = get_supabase_client()
+
+
+# 一个简单的内置食物热量表（kcal/份），后面可扩展
+FOOD_DB: Dict[str, float] = {
     "鸡蛋": 78,
-    "牛奶": 150,
-    "米饭": 200,
-    "面包": 80,
-    "苹果": 95,
-    "香蕉": 100,
-    "橙汁": 110,
-    "可乐": 140,
+    "牛奶": 110,
+    "燕麦": 150,
+    "米饭": 220,
+    "馒头": 220,
+    "面包": 260,
+    "苹果": 52,
+    "香蕉": 89,
+    "西兰花": 35,
     "鸡胸肉": 165,
     "牛肉": 250,
-    "蔬菜": 30,
-    "酸奶": 120,
+    "三文鱼": 208,
+    "酸奶": 80,
+    "坚果": 580,
 }
 
-# ------------------- 工具函数 -------------------
-def load_data() -> Dict[str, Any]:
-    if not os.path.exists(DATA_FILE):
-        return {}
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
 
+# ------------------- 计算热量的工具函数 -------------------
 
-def save_data(data: Dict[str, Any]) -> None:
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def get_food_db() -> Dict[str, float]:
-    custom = st.session_state.get("custom_food_db", {})
-    db = BASE_FOOD_DB.copy()
-    db.update(custom)
-    return db
-
-
-def parse_meal(desc: str, food_db: Dict[str, float]) -> Tuple[float, str]:
+def parse_meal_text(meal_text: str) -> List[str]:
     """
-    将 "鸡蛋 2, 牛奶 1" 解析为 (总热量, 细节字符串)
+    用户输入格式示例：
+        鸡蛋 2, 牛奶 1, 米饭 0.5
+    返回 ["鸡蛋 2", "牛奶 1", "米饭 0.5"] 这种段落，便于进一步解析。
     """
-    if not desc or not desc.strip():
-        return 0.0, ""
+    if not meal_text:
+        return []
+    parts = [p.strip() for p in meal_text.replace("，", ",").split(",") if p.strip()]
+    return parts
 
-    parts = desc.split(",")
-    total_kcal = 0.0
+
+def calc_meal_kcal(meal_text: str) -> (float, str):
+    """
+    解析一餐的文本，返回（总 kcal, 详情文字）。
+    若食物不在字典中，则 kcal 记为 0，并在详情中标明“未知(0kcal)（可在左侧添加）”
+    """
+    segments = parse_meal_text(meal_text)
+    total = 0.0
     detail_list = []
 
-    for raw in parts:
-        item = raw.strip()
-        if not item:
+    for seg in segments:
+        segs = seg.split()
+        if not segs:
             continue
-        segs = item.split()
         name = segs[0]
         qty = 1.0
         if len(segs) > 1:
@@ -79,536 +99,397 @@ def parse_meal(desc: str, food_db: Dict[str, float]) -> Tuple[float, str]:
             except ValueError:
                 qty = 1.0
 
-        kcal_per = food_db.get(name)
+        kcal_per = FOOD_DB.get(name)
         if kcal_per is None:
-            detail_list.append(f"{name}x{qty}=未知(0kcal)（可在左侧添加）")
             kcal = 0.0
+            detail_list.append(f"{name}×{qty} = 未知(0kcal)（可在左侧自定义）")
         else:
             kcal = kcal_per * qty
-            detail_list.append(f"{name}x{qty}={kcal:.0f}kcal")
+            detail_list.append(f"{name}×{qty} ≈ {kcal:.0f} kcal")
 
-        total_kcal += kcal
+        total += kcal
 
-    return total_kcal, "; ".join(detail_list)
-
-
-def get_week_range(date: dt.date):
-    weekday = date.weekday()      # Monday=0
-    monday = date - dt.timedelta(days=weekday)
-    sunday = monday + dt.timedelta(days=6)
-    return monday, sunday
+    detail_text = "；".join(detail_list) if detail_list else "未记录"
+    return total, detail_text
 
 
-# ------------------- 页面设置 & 样式 -------------------
-st.set_page_config(
-    page_title="饮食 / 睡眠 / 排便 / 体重记录",
-    layout="wide"
-)
+def calc_bmi(weight_kg: Optional[float], height_cm: Optional[float]) -> Optional[float]:
+    if not weight_kg or not height_cm:
+        return None
+    h_m = height_cm / 100.0
+    if h_m <= 0:
+        return None
+    return weight_kg / (h_m ** 2)
 
-st.markdown("""
-<style>
-/* 主体宽度和留白 */
-.block-container {
-    max-width: 1100px;
-    padding-top: 1.2rem;
-    padding-bottom: 3rem;
-}
 
-/* 侧边栏 */
-[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
-    border-right: 1px solid #e5e7eb;
-}
+# ------------------- Supabase 操作函数 -------------------
 
-/* 顶部标题 */
-h1 {
-    font-weight: 700;
-    letter-spacing: 0.03em;
-}
-
-/* 区块卡片 */
-.section-card {
-    background-color: #ffffff;
-    border-radius: 1.0rem;
-    padding: 1.2rem 1.4rem 1.3rem 1.4rem;
-    margin-bottom: 1.0rem;
-    border: 1px solid #edf2ff;
-    box-shadow: 0 10px 25px rgba(15, 23, 42, 0.06);
-}
-
-/* 小卡片（指标） */
-.metric-card {
-    background-color: #f9fafb;
-    border-radius: 0.8rem;
-    padding: 0.7rem 0.9rem;
-    border: 1px solid #e5e7eb;
-}
-
-/* 标签说明 */
-.label-muted {
-    color: #6b7280;
-    font-size: 0.88rem;
-}
-
-/* 删除按钮颜色稍柔和 */
-.stButton>button[kind="primary"] {
-    background-color: #dc2626;
-}
-
-/* info / success 提示条 */
-.stAlert {
-    border-radius: 0.8rem;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ------------------- 角色识别：是否医生端 -------------------
-query_params = st.query_params
-is_doctor = ("code" in query_params and query_params["code"] == DOCTOR_CODE)
-
-# ------------------- 侧边栏 -------------------
-with st.sidebar:
-    st.markdown("### 🧾 记录入口")
-    if is_doctor:
-        st.success("当前身份：医生端")
-        mode = st.radio("功能", ["每日记录", "本周汇总", "医生端 Dashboard"], index=0)
-    else:
-        st.info("当前身份：患者/同学端")
-        mode = st.radio("功能", ["每日记录", "本周汇总"], index=0)
-
-    with st.expander("🍎 自定义食物热量", expanded=False):
-        st.caption("遇到无法识别的食物，可在此添加：名称 + 每份热量。以后输入该名称即可自动计算。")
-        new_food_name = st.text_input("食物名称（例如：蛋糕）", key="new_food_name")
-        new_food_kcal = st.number_input(
-            "每份热量（kcal）", min_value=0, max_value=2000,
-            value=100, step=10, key="new_food_kcal"
-        )
-        if st.button("添加 / 更新食物", key="add_food_btn"):
-            if new_food_name.strip():
-                st.session_state.setdefault("custom_food_db", {})
-                st.session_state["custom_food_db"][new_food_name.strip()] = float(new_food_kcal)
-                st.success(f"已保存：{new_food_name.strip()} = {float(new_food_kcal):.0f} kcal/份")
-            else:
-                st.warning("请先填写食物名称。")
-
-        if st.session_state.get("custom_food_db"):
-            custom_items = [
-                {"食物": name, "每份热量(kcal)": kcal}
-                for name, kcal in st.session_state["custom_food_db"].items()
-            ]
-            st.table(pd.DataFrame(custom_items))
-
-# ------------------- 加载数据 -------------------
-data = load_data()
-
-# =========================================================
-#                       每日记录
-# =========================================================
-if mode == "每日记录":
-    st.title("📋 单人生活方式记录工具")
-
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("🗓 基本信息")
-
-    today = dt.date.today()
-    date = st.date_input("选择日期", value=today)
-    date_str = date.isoformat()
-    day_data = data.get(date_str, {})
-
-    st.caption("提示：可以选择历史日期进行补录或修改。")
-
-    # 删除当日记录
-    if date_str in data:
-        col_del1, col_del2 = st.columns([3, 1])
-        with col_del1:
-            st.write("")
-        with col_del2:
-            with st.expander("🗑 删除当天记录", expanded=False):
-                confirm_del_today = st.checkbox("确认删除该日所有记录", key="confirm_del_today")
-                if st.button("删除", key="del_today_btn"):
-                    if confirm_del_today:
-                        del data[date_str]
-                        save_data(data)
-                        st.success(f"已删除 {date_str} 的记录。")
-                        st.rerun()
-                    else:
-                        st.warning("请先勾选确认。")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # ---- 三餐记录 ----
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("🍽 三餐记录")
-
-    st.markdown(
-        '<span class="label-muted">输入示例：<code>鸡蛋 2, 牛奶 1, 米饭 1</code>，中间使用逗号分隔，数字为份数（可不写，默认 1）。</span>',
-        unsafe_allow_html=True
+def load_daily_record(patient_code: str, date: dt.date) -> Optional[Dict[str, Any]]:
+    """从 Supabase 读取某患者某天的记录。"""
+    response = (
+        supabase.table("daily_records")
+        .select("*")
+        .eq("patient_code", patient_code)
+        .eq("log_date", date.isoformat())
+        .execute()
     )
+    data = response.data
+    if data:
+        return data[0]
+    return None
 
+
+def upsert_daily_record(payload: Dict[str, Any]) -> None:
+    """
+    如果已有记录则 update，否则 insert。
+    根据 patient_code + log_date 查找。
+    """
+    patient_code = payload["patient_code"]
+    log_date = payload["log_date"]
+
+    existing = load_daily_record(patient_code, log_date)
+    if existing:
+        supabase.table("daily_records").update(payload).eq("id", existing["id"]).execute()
+    else:
+        supabase.table("daily_records").insert(payload).execute()
+
+
+def query_week_records(patient_code: str, week_start: dt.date, week_end: dt.date) -> pd.DataFrame:
+    resp = (
+        supabase.table("daily_records")
+        .select("*")
+        .eq("patient_code", patient_code)
+        .gte("log_date", week_start.isoformat())
+        .lte("log_date", week_end.isoformat())
+        .order("log_date")
+        .execute()
+    )
+    df = pd.DataFrame(resp.data or [])
+    return df
+
+
+def query_all_patients() -> pd.DataFrame:
+    resp = supabase.table("daily_records").select("*").order("log_date").execute()
+    df = pd.DataFrame(resp.data or [])
+    return df
+
+
+# ------------------- 患者端 UI -------------------
+
+def patient_view():
+    st.markdown("## 👤 患者端 · 生活方式每日记录")
+
+    # 患者编号（只做区分用，不需要实名）
+    patient_code = st.text_input(
+        "患者编号（建议使用你和医生约定的 6~10 位代号，如 A001 或 YY2025）",
+        help="同一个编号会自动归为一位患者，因此不要随意告诉别人。",
+    ).strip()
+
+    if not patient_code:
+        st.info("请先输入患者编号。")
+        return
+
+    # 日期选择
+    today = dt.date.today()
+    col_date, col_height = st.columns([2, 1])
+    with col_date:
+        log_date = st.date_input("记录日期", value=today)
+    with col_height:
+        height_cm = st.number_input("身高（cm，用于计算 BMI，可选）", min_value=80.0, max_value=250.0, value=160.0)
+
+    # 读取已有记录，做预填
+    existing = load_daily_record(patient_code, log_date)
+    default = existing or {}
+
+    st.markdown("### 🍽 三餐记录（输入示例：`鸡蛋 1, 牛奶 1, 米饭 0.5`）")
     col_b, col_l, col_d = st.columns(3)
     with col_b:
-        breakfast_desc = st.text_area(
-            "早餐",
-            value=day_data.get("breakfast_desc", ""),
-            height=100,
-            placeholder="例如：鸡蛋 1, 牛奶 1"
-        )
+        breakfast = st.text_area("早餐", value=default.get("breakfast", ""), height=80)
     with col_l:
-        lunch_desc = st.text_area(
-            "午餐",
-            value=day_data.get("lunch_desc", ""),
-            height=100,
-            placeholder="例如：米饭 1, 蔬菜 1, 鸡胸肉 1"
-        )
+        lunch = st.text_area("午餐", value=default.get("lunch", ""), height=80)
     with col_d:
-        dinner_desc = st.text_area(
-            "晚餐",
-            value=day_data.get("dinner_desc", ""),
-            height=100,
-            placeholder="例如：米饭 1, 牛肉 1, 蔬菜 1"
+        dinner = st.text_area("晚餐", value=default.get("dinner", ""), height=80)
+
+    # 计算三餐热量
+    b_kcal, b_detail = calc_meal_kcal(breakfast)
+    l_kcal, l_detail = calc_meal_kcal(lunch)
+    d_kcal, d_detail = calc_meal_kcal(dinner)
+    total_kcal = b_kcal + l_kcal + d_kcal
+
+    with st.expander("查看热量估算详情", expanded=True):
+        st.write(f"早餐：{b_detail}，合计约 **{b_kcal:.0f} kcal**")
+        st.write(f"午餐：{l_detail}，合计约 **{l_kcal:.0f} kcal**")
+        st.write(f"晚餐：{d_detail}，合计约 **{d_kcal:.0f} kcal**")
+        st.success(f"👉 今日总能量摄入估计约：**{total_kcal:.0f} kcal**（仅供参考）")
+
+    st.markdown("### 🚻 排便情况")
+    col_stool1, col_stool2 = st.columns(2)
+    with col_stool1:
+        stool_times = st.number_input(
+            "排便次数（次/天）", min_value=0, max_value=10, step=1, value=int(default.get("stool_times") or 0)
+        )
+    with col_stool2:
+        stool_note = st.text_input(
+            "排便情况备注（如：正常 / 稀 / 便秘等）", value=default.get("stool_note", "")
         )
 
-    food_db = get_food_db()
-    bk_kcal, bk_detail = parse_meal(breakfast_desc, food_db)
-    ln_kcal, ln_detail = parse_meal(lunch_desc, food_db)
-    dn_kcal, dn_detail = parse_meal(dinner_desc, food_db)
-    total_kcal = bk_kcal + ln_kcal + dn_kcal
-
-    st.markdown("#### 🔢 热量估算")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.caption("早餐总热量")
-        st.markdown(f"**{bk_kcal:.0f} kcal**")
-        if bk_detail:
-            st.caption(bk_detail)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with c2:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.caption("午餐总热量")
-        st.markdown(f"**{ln_kcal:.0f} kcal**")
-        if ln_detail:
-            st.caption(ln_detail)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with c3:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.caption("晚餐总热量")
-        st.markdown(f"**{dn_kcal:.0f} kcal**")
-        if dn_detail:
-            st.caption(dn_detail)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.success(f"👉 当日总热量约：**{total_kcal:.0f} kcal**")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # ---- 排便、睡眠 ----
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("🧠 排便 & 睡眠")
-
-    col_stool, col_sleep = st.columns(2)
-
-    with col_stool:
-        st.markdown("##### 🚽 排便情况")
-        stool_freq = st.text_input(
-            "排便次数（如：0 / 1 / 2）",
-            value=day_data.get("stool_freq", "")
+    st.markdown("### 😴 睡眠情况")
+    col_sleep1, col_sleep2 = st.columns(2)
+    with col_sleep1:
+        sleep_hours = st.number_input(
+            "睡眠时长（小时）",
+            min_value=0.0,
+            max_value=24.0,
+            step=0.5,
+            value=float(default.get("sleep_hours") or 8.0),
         )
-        stool_quality = st.text_input(
-            "性状（偏干 / 正常 / 偏稀 等）",
-            value=day_data.get("stool_quality", "")
+    with col_sleep2:
+        sleep_quality = st.selectbox(
+            "睡眠质量",
+            ["很好", "一般", "较差"],
+            index=["很好", "一般", "较差"].index(default.get("sleep_quality", "一般"))
+            if default.get("sleep_quality") in ["很好", "一般", "较差"]
+            else 1,
         )
 
-    with col_sleep:
-        st.markdown("##### 😴 睡眠情况")
-        sleep_hours = st.text_input(
-            "睡眠时长（小时，如：7.5）",
-            value=day_data.get("sleep_hours", "")
+    st.markdown("### 🏃‍♀️ 运动 / 活动（可选）")
+    col_act1, col_act2 = st.columns(2)
+    with col_act1:
+        activity_minutes = st.number_input(
+            "中等及以上强度活动时间（分钟）",
+            min_value=0,
+            max_value=600,
+            step=10,
+            value=int(default.get("activity_minutes") or 0),
         )
-        sleep_quality = st.text_input(
-            "睡眠质量（好 / 一般 / 差 或 1-5 分）",
-            value=day_data.get("sleep_quality", "")
-        )
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # ---- 运动 & 情绪 / 体重 BMI ----
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("🏃‍♀️ 生活方式与体重")
-
-    col_act, col_wt = st.columns(2)
-
-    with col_act:
-        st.markdown("##### 运动与情绪（可选）")
-        exercise = st.text_input(
-            "运动 / 步数（如：快走30分钟 / 8000步）",
-            value=day_data.get("exercise", "")
-        )
-        mood = st.text_input(
-            "情绪 / 压力（可用 1-5 分或文字描述）",
-            value=day_data.get("mood", "")
+    with col_act2:
+        activity_intensity = st.selectbox(
+            "总体活动强度",
+            ["很少", "中等", "较多"],
+            index=["很少", "中等", "较多"].index(default.get("activity_intensity", "很少"))
+            if default.get("activity_intensity") in ["很少", "中等", "较多"]
+            else 0,
         )
 
-    with col_wt:
-        st.markdown("##### ⚖️ 体重与 BMI（建议每周记录一次）")
-        wt_col1, wt_col2, wt_col3 = st.columns([1, 1, 1.2])
-        with wt_col1:
-            weight_kg = st.text_input(
-                "体重（kg）",
-                value=day_data.get("weight_kg", "")
-            )
-        with wt_col2:
-            height_m = st.text_input(
-                "身高（m，例如 1.60）",
-                value=day_data.get("height_m", "1.60")
-            )
-
-        bmi_value = day_data.get("bmi", "")
-        if weight_kg and height_m:
-            try:
-                w = float(weight_kg)
-                h = float(height_m)
-                if h > 0:
-                    bmi_value = round(w / (h * h), 1)
-            except ValueError:
-                bmi_value = day_data.get("bmi", "")
-
-        with wt_col3:
-            st.markdown("最近 BMI")
-            st.markdown(f"### {bmi_value}" if bmi_value != "" else "—")
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # ---- 保存按钮 ----
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    if st.button("💾 保存当天数据", use_container_width=True):
-        data[date_str] = {
-            "breakfast_desc": breakfast_desc,
-            "lunch_desc": lunch_desc,
-            "dinner_desc": dinner_desc,
-            "kcal_total": total_kcal,
-            "stool_freq": stool_freq,
-            "stool_quality": stool_quality,
-            "sleep_hours": sleep_hours,
-            "sleep_quality": sleep_quality,
-            "exercise": exercise,
-            "mood": mood,
-            "weight_kg": weight_kg,
-            "height_m": height_m,
-            "bmi": bmi_value
-        }
-        save_data(data)
-        st.success("✅ 已保存！")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# =========================================================
-#                       本周汇总
-# =========================================================
-if mode == "本周汇总":
-    st.title("📊 本周汇总")
-
-    today = dt.date.today()
-    monday, sunday = get_week_range(today)
-    st.caption(f"本周范围：{monday.isoformat()} ~ {sunday.isoformat()}")
-
-    rows = []
-    week_total_kcal = 0.0
-
-    for date_str, day_data in data.items():
-        try:
-            d = dt.date.fromisoformat(date_str)
-        except ValueError:
-            continue
-
-        if not (monday <= d <= sunday):
-            continue
-
-        total_kcal = float(day_data.get("kcal_total", 0.0))
-        week_total_kcal += total_kcal
-
-        rows.append({
-            "日期": date_str,
-            "总热量(kcal)": round(total_kcal, 0),
-            "睡眠时长(h)": day_data.get("sleep_hours", ""),
-            "排便次数": day_data.get("stool_freq", ""),
-            "体重(kg)": day_data.get("weight_kg", ""),
-            "BMI": day_data.get("bmi", ""),
-        })
-
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    if not rows:
-        st.warning("本周尚无记录，请先在『每日记录』中填写几天数据。")
-    else:
-        df = pd.DataFrame(rows).sort_values("日期")
-        st.markdown("#### 周度摘要")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(
-                f'<div class="metric-card"><span class="label-muted">本周总能量摄入</span><br><b>{week_total_kcal:.0f} kcal</b></div>',
-                unsafe_allow_html=True
-            )
-        with c2:
-            avg_kcal = df["总热量(kcal)"].mean()
-            st.markdown(
-                f'<div class="metric-card"><span class="label-muted">平均每日能量摄入</span><br><b>{avg_kcal:.0f} kcal/天</b></div>',
-                unsafe_allow_html=True
-            )
-
-        st.markdown("#### 明细表")
-        st.dataframe(df, use_container_width=True)
-
-        if "总热量(kcal)" in df.columns:
-            chart_df = df[["日期", "总热量(kcal)"]].set_index("日期")
-            st.line_chart(chart_df)
-
-        csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label="⬇️ 导出本周数据为 CSV",
-            data=csv_bytes,
-            file_name=f"week_{monday.isoformat()}_{sunday.isoformat()}.csv",
-            mime="text/csv"
+    st.markdown("### ⚖ 体重 & BMI（建议每周至少记录 1 次）")
+    col_w1, col_w2 = st.columns(2)
+    with col_w1:
+        weight_kg = st.number_input(
+            "体重（kg）", min_value=0.0, max_value=300.0, step=0.1, value=float(default.get("weight_kg") or 0.0)
         )
-
-        st.markdown("---")
-        st.markdown("#### 🗑 删除本周某天记录")
-        date_options = [r["日期"] for r in rows]
-        del_date = st.selectbox("选择要删除的日期", options=date_options)
-
-        confirm_del_week = st.checkbox("确认删除所选日期记录", key="confirm_del_week")
-        if st.button("🗑 删除该日期记录", type="primary", key="del_week_btn"):
-            if confirm_del_week:
-                if del_date in data:
-                    del data[del_date]
-                    save_data(data)
-                    st.success(f"已删除 {del_date} 的记录。")
-                    st.rerun()
-                else:
-                    st.warning("未在数据中找到该日期。")
-            else:
-                st.warning("请先勾选“确认删除所选日期记录”。")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# =========================================================
-#                       医生端 Dashboard
-# =========================================================
-if is_doctor and mode == "医生端 Dashboard":
-    st.title("👨‍⚕️ 医生端 Dashboard")
-
-    if not data:
-        st.warning("当前还没有任何记录。")
-    else:
-        # 整理为 DataFrame
-        records = []
-        for date_str, d in data.items():
-            rec = {"日期": date_str}
-            rec.update(d)
-            records.append(rec)
-        df = pd.DataFrame(records)
-        df["日期"] = pd.to_datetime(df["日期"])
-
-        for col in ["kcal_total", "sleep_hours", "stool_freq", "weight_kg", "bmi"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        min_date = df["日期"].min().date()
-        max_date = df["日期"].max().date()
-
-        st.caption(f"可用数据时间范围：{min_date} ~ {max_date}")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("起始日期", value=min_date, min_value=min_date, max_value=max_date)
-        with col2:
-            end_date = st.date_input("结束日期", value=max_date, min_value=min_date, max_value=max_date)
-
-        if start_date > end_date:
-            st.error("起始日期不能晚于结束日期。")
+    with col_w2:
+        bmi_val = calc_bmi(weight_kg if weight_kg > 0 else None, height_cm)
+        if bmi_val:
+            st.metric("自动计算 BMI", f"{bmi_val:.1f}")
         else:
-            mask = (df["日期"].dt.date >= start_date) & (df["日期"].dt.date <= end_date)
-            df_sel = df.loc[mask].sort_values("日期")
+            st.write("输入体重和身高后可自动计算 BMI")
+        bmi = bmi_val or float(default.get("bmi") or 0.0)
 
-            if df_sel.empty:
-                st.warning("该时间段内没有记录。")
-            else:
-                st.markdown('<div class="section-card">', unsafe_allow_html=True)
-                st.subheader("核心指标")
+    # 保存按钮
+    if st.button("💾 保存今日记录", use_container_width=True, type="primary"):
+        payload = {
+            "patient_code": patient_code,
+            "log_date": log_date,
+            "breakfast": breakfast,
+            "lunch": lunch,
+            "dinner": dinner,
+            "stool_times": int(stool_times),
+            "stool_note": stool_note,
+            "sleep_hours": float(sleep_hours),
+            "sleep_quality": sleep_quality,
+            "activity_minutes": int(activity_minutes),
+            "activity_intensity": activity_intensity,
+            "weight_kg": float(weight_kg) if weight_kg else None,
+            "bmi": float(bmi) if bmi else None,
+            "total_kcal": float(total_kcal),
+        }
+        upsert_daily_record(payload)
+        st.success("✅ 已保存到云端（Supabase）。")
 
-                days = df_sel["日期"].nunique()
-                avg_kcal = df_sel["kcal_total"].mean()
-                avg_sleep = df_sel["sleep_hours"].mean()
-                avg_stool = df_sel["stool_freq"].mean()
-                last_weight = df_sel.sort_values("日期")["weight_kg"].dropna().iloc[-1] if df_sel["weight_kg"].notna().any() else None
-                last_bmi = df_sel.sort_values("日期")["bmi"].dropna().iloc[-1] if df_sel["bmi"].notna().any() else None
+    st.markdown("---")
+    st.markdown("### 📅 本周汇总（根据当前选择日期所在周）")
 
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                    st.caption("记录天数")
-                    st.markdown(f"### {days}")
-                    st.caption(f"平均能量：{avg_kcal:.0f} kcal/天" if pd.notna(avg_kcal) else "平均能量：NA")
-                    st.markdown('</div>', unsafe_allow_html=True)
+    week_start = log_date - dt.timedelta(days=log_date.weekday())  # 周一
+    week_end = week_start + dt.timedelta(days=6)  # 周日
 
-                with c2:
-                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                    st.caption("睡眠 & 排便")
-                    st.markdown(f"平均睡眠：{avg_sleep:.1f} h" if pd.notna(avg_sleep) else "平均睡眠：NA")
-                    st.markdown(f"平均排便：{avg_stool:.1f} 次/天" if pd.notna(avg_stool) else "平均排便：NA")
-                    st.markdown('</div>', unsafe_allow_html=True)
+    df_week = query_week_records(patient_code, week_start, week_end)
+    if df_week.empty:
+        st.info("本周尚无记录。")
+        return
 
-                with c3:
-                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                    st.caption("最近体重 / BMI")
-                    st.markdown(f"体重：{last_weight:.1f} kg" if last_weight is not None else "体重：NA")
-                    st.markdown(f"BMI：{last_bmi:.1f}" if last_bmi is not None else "BMI：NA")
-                    st.markdown('</div>', unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+    df_display = df_week[["log_date", "total_kcal", "sleep_hours", "stool_times", "weight_kg", "bmi"]].copy()
+    df_display = df_display.rename(
+        columns={
+            "log_date": "日期",
+            "total_kcal": "总热量(kcal)",
+            "sleep_hours": "睡眠时长(h)",
+            "stool_times": "排便(次)",
+            "weight_kg": "体重(kg)",
+            "bmi": "BMI",
+        }
+    )
+    st.dataframe(df_display, use_container_width=True)
 
-                # 趋势图
-                st.markdown('<div class="section-card">', unsafe_allow_html=True)
-                st.subheader("趋势图")
+    col_sum1, col_sum2, col_sum3 = st.columns(3)
+    with col_sum1:
+        st.metric("本周总能量摄入", f"{df_week['total_kcal'].sum():.0f} kcal")
+    with col_sum2:
+        st.metric("平均睡眠时长", f"{df_week['sleep_hours'].mean():.1f} h")
+    with col_sum3:
+        valid_weight = df_week["weight_kg"].dropna()
+        if not valid_weight.empty:
+            st.metric("本周体重范围", f"{valid_weight.min():.1f} - {valid_weight.max():.1f} kg")
 
-                ts = df_sel.set_index("日期")
 
-                if "kcal_total" in ts:
-                    st.markdown("**每日总热量（kcal）**")
-                    st.line_chart(ts[["kcal_total"]].rename(columns={"kcal_total": "总热量(kcal)"}))
+# ------------------- 医生端 Dashboard -------------------
 
-                cols_to_plot = []
-                if "weight_kg" in ts:
-                    cols_to_plot.append("weight_kg")
-                if "bmi" in ts:
-                    cols_to_plot.append("bmi")
-                if cols_to_plot:
-                    st.markdown("**体重 / BMI 变化**")
-                    st.line_chart(ts[cols_to_plot].rename(columns={"weight_kg": "体重(kg)", "bmi": "BMI"}))
+def doctor_view():
+    st.markdown("## 🩺 医生端 Dashboard")
 
-                if "sleep_hours" in ts:
-                    st.markdown("**睡眠时长（h）**")
-                    st.line_chart(ts[["sleep_hours"]].rename(columns={"sleep_hours": "睡眠时长(h)"}))
-                st.markdown('</div>', unsafe_allow_html=True)
+    code = st.text_input("请输入医生访问暗号", type="password")
+    if not code:
+        st.info("输入暗号后可查看 Dashboard。")
+        return
+    if code != DOCTOR_CODE:
+        st.error("暗号错误。")
+        return
 
-                # 明细 + 导出
-                st.markdown('<div class="section-card">', unsafe_allow_html=True)
-                st.subheader("明细数据（可导出）")
+    st.success("已通过验证。")
 
-                show_cols = ["日期", "kcal_total", "sleep_hours", "stool_freq", "weight_kg", "bmi",
-                             "exercise", "mood"]
-                show_cols = [c for c in show_cols if c in df_sel.columns]
-                df_show = df_sel[show_cols].copy()
-                df_show = df_show.rename(columns={
-                    "kcal_total": "总热量(kcal)",
-                    "sleep_hours": "睡眠时长(h)",
-                    "stool_freq": "排便次数",
-                    "weight_kg": "体重(kg)"
-                })
-                st.dataframe(df_show, use_container_width=True)
+    df_all = query_all_patients()
+    if df_all.empty:
+        st.info("目前数据库中还没有任何记录。")
+        return
 
-                csv_all = df_show.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    label="⬇️ 导出当前时间段明细为 CSV",
-                    data=csv_all,
-                    file_name=f"doctor_dashboard_{start_date}_{end_date}.csv",
-                    mime="text/csv"
-                )
-                st.markdown('</div>', unsafe_allow_html=True)
+    # 把日期列转为真正的 date 类型
+    if "log_date" in df_all.columns:
+        df_all["log_date"] = pd.to_datetime(df_all["log_date"]).dt.date
+
+    patient_list = sorted(df_all["patient_code"].dropna().unique().tolist())
+    col_top1, col_top2 = st.columns([2, 3])
+    with col_top1:
+        patient = st.selectbox("选择患者编号", options=patient_list)
+    with col_top2:
+        date_range = st.date_input(
+            "选择时间范围",
+            value=(df_all["log_date"].min(), df_all["log_date"].max()),
+        )
+
+    if not isinstance(date_range, (list, tuple)) or len(date_range) != 2:
+        st.warning("请选择起止日期。")
+        return
+
+    start_date, end_date = date_range
+    mask = (
+        (df_all["patient_code"] == patient)
+        & (df_all["log_date"] >= start_date)
+        & (df_all["log_date"] <= end_date)
+    )
+    df = df_all.loc[mask].copy()
+    if df.empty:
+        st.info("所选患者在该时间范围内暂无数据。")
+        return
+
+    st.markdown(f"### 📈 患者 {patient} 在 {start_date} ~ {end_date} 的记录")
+
+    # 简单趋势图
+    cols_plot = st.columns(3)
+    with cols_plot[0]:
+        if df["total_kcal"].notna().any():
+            st.line_chart(df.set_index("log_date")["total_kcal"], height=200)
+            st.caption("每日总热量摄入变化")
+    with cols_plot[1]:
+        if df["sleep_hours"].notna().any():
+            st.line_chart(df.set_index("log_date")["sleep_hours"], height=200)
+            st.caption("睡眠时长变化")
+    with cols_plot[2]:
+        valid_weight = df["weight_kg"].dropna()
+        if not valid_weight.empty:
+            st.line_chart(df.set_index("log_date")["weight_kg"], height=200)
+            st.caption("体重变化")
+
+    # 统计摘要
+    st.markdown("#### 📊 统计摘要")
+    col_m1, col_m2, col_m3 = st.columns(3)
+    with col_m1:
+        st.metric("平均每日总热量", f"{df['total_kcal'].mean():.0f} kcal")
+    with col_m2:
+        st.metric("平均睡眠时长", f"{df['sleep_hours'].mean():.1f} h")
+    with col_m3:
+        st.metric("平均排便次数", f"{df['stool_times'].mean():.1f} 次/天")
+
+    st.markdown("#### 🧾 原始明细")
+    df_display = df[
+        [
+            "log_date",
+            "breakfast",
+            "lunch",
+            "dinner",
+            "total_kcal",
+            "sleep_hours",
+            "sleep_quality",
+            "stool_times",
+            "stool_note",
+            "activity_minutes",
+            "activity_intensity",
+            "weight_kg",
+            "bmi",
+        ]
+    ].copy()
+    df_display = df_display.rename(
+        columns={
+            "log_date": "日期",
+            "breakfast": "早餐",
+            "lunch": "午餐",
+            "dinner": "晚餐",
+            "total_kcal": "总热量(kcal)",
+            "sleep_hours": "睡眠(h)",
+            "sleep_quality": "睡眠质量",
+            "stool_times": "排便(次)",
+            "stool_note": "排便备注",
+            "activity_minutes": "活动(分钟)",
+            "activity_intensity": "活动强度",
+            "weight_kg": "体重(kg)",
+            "bmi": "BMI",
+        }
+    )
+
+    st.dataframe(df_display, use_container_width=True)
+
+    # 导出 CSV
+    csv = df_display.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "📥 导出为 CSV（方便做进一步统计或导入 R / Python）",
+        data=csv,
+        file_name=f"{patient}_{start_date}_{end_date}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+# ------------------- 页面主入口 -------------------
+
+def main():
+    st.title("📋 单人生活方式记录工具（Supabase 多用户版）")
+
+    mode = st.sidebar.radio(
+        "选择角色",
+        ["患者端", "医生端 Dashboard"],
+        help="患者端用于日常填写；医生端通过暗号进入，查看所有记录。",
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**数据说明**")
+    st.sidebar.caption(
+        "所有数据加密存储在 Supabase，仅通过患者编号关联，不记录真实姓名。"
+    )
+
+    if mode == "患者端":
+        patient_view()
+    else:
+        doctor_view()
+
+
+if __name__ == "__main__":
+    main()
+
