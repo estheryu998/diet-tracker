@@ -353,14 +353,18 @@ with col_bmi:
 
 st.markdown("---")
 
+# ----------------------------- 提交按钮 -----------------------------
+
+st.markdown("---")
+
 if st.button("✅ 提交今天的记录", type="primary"):
     code = patient_code.strip()
 
     if not code:
-        st.error("请先填写记录代码（向医生索取）。")
+        st.error("请先填写记录代码（向管理者索取）。")
         st.stop()
 
-    # 1) 先检查代码是否存在于 patients 表中，防止填错污染别人
+    # 1) 先检查患者代码是否存在于 patients 表中，防止填错污染别人
     try:
         check = (
             supabase.table("patients")
@@ -370,15 +374,35 @@ if st.button("✅ 提交今天的记录", type="primary"):
             .execute()
         )
     except Exception as e:
-        st.error("验证记录代码时出错，请稍后再试或联系医生。")
+        st.error("验证记录代码时出错，请稍后再试或联系管理者。")
         st.code(str(e))
         st.stop()
 
     if not check.data:
-        st.error("记录代码不存在，请确认后再填写。如有疑问请联系医生。")
+        st.error("记录代码不存在，请确认后再填写。如有疑问请联系管理者。")
         st.stop()
 
-    # 2) 通过校验后，准备写入 daily_records
+    # 2) 再检查：同一记录代码 + 同一天 是否已经有记录
+    try:
+        dup = (
+            supabase.table("daily_records")
+            .select("id")
+            .eq("patient_code", code)
+            .eq("log_date", log_date.isoformat())
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        st.error("检查当天记录时出错，请稍后再试或联系管理者。")
+        st.code(str(e))
+        st.stop()
+
+    if dup.data:
+        # 已经有一条今天的记录了，阻止重复提交
+        st.warning("今天的记录已经提交过了，如需修改请联系管理者在后台协助处理。")
+        st.stop()
+
+    # 3) 通过两重校验后，准备写入 daily_records
     data = {
         "log_date": log_date.isoformat(),
         "patient_code": code,
@@ -408,5 +432,4 @@ if st.button("✅ 提交今天的记录", type="primary"):
         if getattr(res, "data", None):
             st.success("已成功提交今天的记录，感谢你的配合！")
         else:
-            st.warning("已尝试提交，但未收到返回数据，可稍后让医生在后台确认。")
-
+            st.warning("已尝试提交，但未收到返回数据，可稍后让管理者在后台确认。")
