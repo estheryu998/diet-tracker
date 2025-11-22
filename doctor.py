@@ -1,170 +1,291 @@
-import streamlit as st
-from datetime import date
-from supabase import create_client, Client
+import secrets
+import string
+from datetime import date, timedelta
+
 import pandas as pd
+import altair as alt
+import streamlit as st
+from supabase import create_client, Client
 
-# ========= 读取 Supabase 配置 =========
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_ANON_KEY"]
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# ========= 基础配置 =========
 
 st.set_page_config(
-    page_title="医生端 · 生活方式队列 Dashboard",
-    layout="wide"
+    page_title="生活方式记录 · 医生端",
+    page_icon="🩺",
+    layout="wide",
 )
 
-# ========= 简单密码保护 =========
-st.title("🩺 医生端 · 生活方式队列 Dashboard")
+# 连接 Supabase（医生端用 service_role key）
+@st.cache_resource
+def get_supabase() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_SERVICE_KEY"]
+    return create_client(url, key)
 
-pwd = st.text_input("请输入医生访问密码", type="password")
 
-if "authed" not in st.session_state:
-    st.session_state.authed = False
+supabase = get_supabase()
 
-if not st.session_state.authed:
-    if pwd:
-        if "DOCTOR_PASSWORD" not in st.secrets:
-            st.error("未配置 DOCTOR_PASSWORD，请先在 Streamlit Secrets 中设置。")
-            st.stop()
-        if pwd == st.secrets["DOCTOR_PASSWORD"]:
-            st.session_state.authed = True
-            st.success("已通过身份验证")
-        else:
-            st.error("密码错误")
-            st.stop()
-    else:
-        st.info("请输入访问密码后查看数据")
-        st.stop()
 
 # ========= 工具函数 =========
-@st.cache_data(ttl=60)
-def load_all_records():
-    """从 Supabase 拉取全部记录，返回 DataFrame"""
-    res = (
+
+def generate_patient_code(length: int = 8) -> str:
+    """生成随机患者代码（大写字母 + 数字）"""
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+@st.cache_data(ttl=30)
+def load_patients() -> pd.DataFrame:
+    """读取患者列表"""
+    res = supabase.table("patients").select("*").order("created_at", desc=False).execute()
+    data = res.data or []
+    df = pd.DataFrame(data)
+    if not df.empty:
+        df["created_at"] = pd.to_datetime(df["created_at"])
+    return df
+
+
+@st.cache_data(ttl=30)
+def load_records(
+    patient_code: str | None,
+    start_date: date | None,
+    end_date: date | None,
+) -> pd.DataFrame:
+    """读取 daily_records，按患者和日期筛选"""
+    query = (
         supabase.table("daily_records")
         .select("*")
         .order("log_date", desc=False)
-        .execute()
     )
-    data = res.data or []
-    if not data:
-        return pd.DataFrame()
-    df = pd.DataFrame(data)
 
-    # 转换日期类型
-    if "log_date" in df.columns:
+    if patient_code and patient_code != "__ALL__":
+        query = query.eq("patient_code", patient_code)
+
+    if start_date:
+        query = query.gte("log_date", start_date.isoformat())
+    if end_date:
+        query = query.lte("log_date", end_date.isoformat())
+
+    res = query.execute()
+    data = res.data or []
+    df = pd.DataFrame(data)
+    if not df.empty:
         df["log_date"] = pd.to_datetime(df["log_date"]).dt.date
     return df
 
 
-# ========= 读取数据 =========
-df = load_all_records()
+def invalidate_cache():
+    load_patients.clear()
+    load_records.clear()
 
-if df.empty:
-    st.warning("当前 Supabase 表 daily_records 中还没有任何数据。")
-    st.stop()
 
-# ========= 侧边栏筛选 =========
-st.sidebar.header("筛选条件")
+# ========= 侧边栏：患者管理 =========
 
-# 患者列表
-patient_list = sorted(df["patient_code"].dropna().unique())
-patient_options = ["全部患者"] + patient_list
-selected_patient = st.sidebar.selectbox("选择患者", patient_options)
+st.sidebar.title("🩺 医生端控制台")
+
+st.sidebar.subheader("患者列表 / 管理")
+
+patients_df = load_patients()
+
+col1, col2 = st.sidebar.columns([2, 1])
+with col1:
+    if st.button("🔄 刷新患者列表", use_container_width=True):
+        invalidate_cache()
+        patients_df = load_patients()
+with col2:
+    st.write("")
+
+st.sidebar.caption("说明：患者代码只发给本人用于登录患者端，不含任何姓名等隐私。")
+
+# 新建患者
+with st.sidebar.expander("➕ 创建新患者", expanded=False):
+    note = st.text_input("备注（例如：AIH-001，方便医生识别）", key="new_patient_note")
+    if st.button("生成患者代码", type="primary", use_container_width=True):
+        code = generate_patient_code()
+        payload = {"patient_code": code, "note": note or None, "active": True}
+        res = supabase.table("patients").insert(payload).execute()
+        # Supabase Python SDK v2 没有 res.error 属性，这里只简单判断 data
+        if res.data:
+            st.success(f"已生成患者代码：`{code}`")
+            st.caption("请将此代码发给患者，让 Ta 在患者端输入。")
+            invalidate_cache()
+        else:
+            st.error("生成患者代码失败，请稍后重试。")
+
+# 患者选择器
+st.sidebar.markdown("---")
+st.sidebar.subheader("📌 选择要查看的患者")
+
+patient_options = ["全部患者"]
+patient_map = {}  # 用于展示 note
+if not patients_df.empty:
+    for _, row in patients_df.iterrows():
+        label = row["patient_code"]
+        if pd.notna(row.get("note")) and row["note"]:
+            label += f"（{row['note']}）"
+        patient_options.append(label)
+        patient_map[label] = row["patient_code"]
+
+selected_label = st.sidebar.selectbox("患者", options=patient_options, index=0)
+selected_code = "__ALL__" if selected_label == "全部患者" else patient_map[selected_label]
+
+# 当前选中患者的状态控制
+if selected_code != "__ALL__" and not patients_df.empty:
+    row = patients_df[patients_df["patient_code"] == selected_code].iloc[0]
+    st.sidebar.markdown("### 当前患者信息")
+    st.sidebar.code(selected_code)
+    if pd.notna(row.get("note")) and row["note"]:
+        st.sidebar.text(f"备注：{row['note']}")
+    st.sidebar.text(f"创建时间：{row['created_at']:%Y-%m-%d %H:%M}")
+
+    active = bool(row.get("active", True))
+    new_active = st.sidebar.toggle("是否启用（可用于暂时停用患者）", value=active)
+    if new_active != active:
+        supabase.table("patients").update({"active": new_active}).eq(
+            "patient_code", selected_code
+        ).execute()
+        invalidate_cache()
+        st.sidebar.success("已更新患者启用状态")
+
+
+# ========= 主页面：数据视图与可视化 =========
+
+st.title("📊 单人生活方式记录 · 医生端 Dashboard")
 
 # 日期范围
-min_date = df["log_date"].min()
-max_date = df["log_date"].max()
+st.markdown("#### 时间范围")
+default_end = date.today()
+default_start = default_end - timedelta(days=30)
+col_start, col_end = st.columns(2)
+with col_start:
+    start_date = st.date_input("起始日期", value=default_start, format="YYYY-MM-DD")
+with col_end:
+    end_date = st.date_input("结束日期", value=default_end, format="YYYY-MM-DD")
 
-date_range = st.sidebar.date_input(
-    "日期范围",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date,
-)
-
-if isinstance(date_range, tuple) or isinstance(date_range, list):
-    start_date, end_date = date_range
-else:
-    start_date = end_date = date_range
-
-# 应用筛选
-df_filtered = df.copy()
-
-if selected_patient != "全部患者":
-    df_filtered = df_filtered[df_filtered["patient_code"] == selected_patient]
-
-df_filtered = df_filtered[
-    (df_filtered["log_date"] >= start_date) &
-    (df_filtered["log_date"] <= end_date)
-]
-
-if df_filtered.empty:
-    st.warning("当前筛选条件下没有记录。")
+if start_date > end_date:
+    st.error("起始日期不能晚于结束日期。")
     st.stop()
 
-# ========= 顶部 KPI =========
-st.subheader("📈 总览指标")
+# 读取数据
+records_df = load_records(selected_code, start_date, end_date)
 
-col1, col2, col3, col4 = st.columns(4)
+if records_df.empty:
+    st.warning("当前筛选条件下，没有生活方式记录。")
+    st.stop()
 
-with col1:
-    st.metric("记录条数", len(df_filtered))
+# 字段整理
+numeric_cols = [
+    "sleep_hours",
+    "sport_minutes",
+    "weight",
+    "bmi",
+    "bowel_count",
+]
+for col in numeric_cols:
+    if col in records_df.columns:
+        records_df[col] = pd.to_numeric(records_df[col], errors="coerce")
 
-with col2:
-    if "weight" in df_filtered.columns:
-        st.metric("平均体重 (kg)", f"{df_filtered['weight'].mean():.1f}")
-    else:
-        st.metric("平均体重 (kg)", "-")
+st.markdown("### 原始数据")
+st.dataframe(records_df.sort_values("log_date", ascending=False), use_container_width=True)
 
-with col3:
-    if "BMI" in df_filtered.columns:
-        st.metric("平均 BMI", f"{df_filtered['BMI'].mean():.1f}")
-    else:
-        st.metric("平均 BMI", "-")
+# ========= 可视化 =========
 
-with col4:
-    if "bowel_count" in df_filtered.columns:
-        st.metric("平均排便次数/日", f"{df_filtered['bowel_count'].mean():.2f}")
-    else:
-        st.metric("平均排便次数/日", "-")
+st.markdown("### 趋势图")
 
-st.markdown("---")
-
-# ========= 时间序列图 =========
-st.subheader("📉 时间序列趋势")
-
-ts_cols = st.multiselect(
-    "选择需要展示的指标（折线图）",
-    options=[c for c in [
-        "weight", "BMI", "sleep_hours", "bowel_count", "sport_minutes"
-    ] if c in df_filtered.columns],
-    default=[c for c in ["weight", "BMI"] if c in df_filtered.columns]
+chart_tab1, chart_tab2, chart_tab3 = st.tabs(
+    ["💤 睡眠与运动", "⚖️ 体重与 BMI", "🚽 排便情况"]
 )
 
-if ts_cols:
-    df_plot = df_filtered.sort_values("log_date")
-    df_plot = df_plot[["log_date"] + ts_cols].set_index("log_date")
+with chart_tab1:
+    c1_cols = st.columns(2)
+    with c1_cols[0]:
+        if "sleep_hours" in records_df.columns:
+            chart = (
+                alt.Chart(records_df)
+                .mark_line(point=True)
+                .encode(
+                    x="log_date:T",
+                    y=alt.Y("sleep_hours:Q", title="睡眠时长（小时）"),
+                    tooltip=["log_date:T", "sleep_hours:Q", "patient_code:N"],
+                    color="patient_code:N" if selected_code == "__ALL__" else alt.value("#4e79a7"),
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("当前没有睡眠时长字段。")
 
-    st.line_chart(df_plot, use_container_width=True)
-else:
-    st.info("请选择至少一个指标进行趋势展示")
+    with c1_cols[1]:
+        if "sport_minutes" in records_df.columns:
+            chart = (
+                alt.Chart(records_df)
+                .mark_bar()
+                .encode(
+                    x="log_date:T",
+                    y=alt.Y("sport_minutes:Q", title="运动时长（分钟）"),
+                    tooltip=["log_date:T", "sport_minutes:Q", "patient_code:N"],
+                    color="patient_code:N" if selected_code == "__ALL__" else alt.value("#f28e2b"),
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("当前没有运动时长字段。")
 
-st.markdown("---")
+with chart_tab2:
+    if "weight" in records_df.columns:
+        chart_w = (
+            alt.Chart(records_df)
+            .mark_line(point=True)
+            .encode(
+                x="log_date:T",
+                y=alt.Y("weight:Q", title="体重（kg）"),
+                tooltip=["log_date:T", "weight:Q", "patient_code:N"],
+                color="patient_code:N" if selected_code == "__ALL__" else alt.value("#59a14f"),
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(chart_w, use_container_width=True)
+    else:
+        st.info("当前没有体重字段。")
 
-# ========= 明细表 & 导出 =========
-st.subheader("📄 明细数据")
+    if "bmi" in records_df.columns:
+        chart_b = (
+            alt.Chart(records_df)
+            .mark_line(point=True, strokeDash=[4, 2])
+            .encode(
+                x="log_date:T",
+                y=alt.Y("bmi:Q", title="BMI"),
+                tooltip=["log_date:T", "bmi:Q", "patient_code:N"],
+                color="patient_code:N" if selected_code == "__ALL__" else alt.value("#e15759"),
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(chart_b, use_container_width=True)
+    else:
+        st.info("当前没有 BMI 字段。")
 
-# 排序让最近日期在前
-df_view = df_filtered.sort_values(["patient_code", "log_date"], ascending=[True, False])
+with chart_tab3:
+    if "bowel_count" in records_df.columns:
+        chart_bc = (
+            alt.Chart(records_df)
+            .mark_bar()
+            .encode(
+                x="log_date:T",
+                y=alt.Y("bowel_count:Q", title="排便次数"),
+                tooltip=[
+                    "log_date:T",
+                    "bowel_count:Q",
+                    "bowel_status:N",
+                    "patient_code:N",
+                ],
+                color="patient_code:N" if selected_code == "__ALL__" else alt.value("#b07aa1"),
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(chart_bc, use_container_width=True)
+    else:
+        st.info("当前没有排便次数字段。")
 
-st.dataframe(df_view, use_container_width=True)
-
-csv = df_view.to_csv(index=False).encode("utf-8-sig")
-st.download_button(
-    label="⬇️ 导出当前筛选结果为 CSV",
-    data=csv,
-    file_name="diet_tracker_filtered.csv",
-    mime="text/csv",
-)
+st.markdown("—— 以上为医生端 Dashboard，用于查看与管理多名患者的生活方式记录 ——")
