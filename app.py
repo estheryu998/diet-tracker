@@ -1,12 +1,11 @@
 import datetime
-from typing import Optional
-
-import pandas as pd
+import math
 import streamlit as st
-from supabase import Client, create_client
+from supabase import create_client, Client
 
-
-# ========= Supabase 连接 =========
+# -----------------------------
+# Supabase 客户端（从 secrets 读取）
+# -----------------------------
 @st.cache_resource
 def get_supabase_client() -> Client:
     url = st.secrets["SUPABASE_URL"]
@@ -16,224 +15,170 @@ def get_supabase_client() -> Client:
 
 supabase = get_supabase_client()
 
-
-# ========= 数据库操作 =========
-def insert_daily_record(data: dict) -> Optional[str]:
+# -----------------------------
+# 写入数据库的封装
+# -----------------------------
+def insert_daily_record(data: dict):
     """
-    向 daily_records 表插入一条记录。
-    返回错误信息字符串（如果有），正常则返回 None。
+    向 Supabase 的 daily_records 表插入一条记录。
+    使用 Supabase v2 API：response.data / response.count / response.status_code
     """
     try:
         response = supabase.table("daily_records").insert(data).execute()
-        if response.error:
-            return str(response.error)
-        return None
+
+        # 正常情况下，插入成功会返回新插入的行数据
+        if response.data is None:
+            # 常见原因：RLS 拒绝了这条 insert
+            return False, "插入失败：Supabase 未返回数据（可能被 Row Level Security 拒绝）"
+
+        return True, response.data
+
     except Exception as e:
-        return str(e)
+        # 把异常信息返回给前端展示
+        return False, str(e)
 
 
-def load_patient_history(patient_code: str) -> pd.DataFrame:
-    """
-    查询某个 patient_code 的全部记录，按日期排序。
-    """
-    try:
-        res = (
-            supabase.table("daily_records")
-            .select("*")
-            .eq("patient_code", patient_code)
-            .order("log_date", desc=False)
-            .execute()
-        )
-        if res.data:
-            df = pd.DataFrame(res.data)
-            return df
-        return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+st.set_page_config(page_title="单人生活方式记录工具（Supabase 版）", page_icon="📋", layout="wide")
 
+st.title("📋 单人生活方式记录工具（Supabase 版）")
+st.write("用于记录饮食 / 睡眠 / 排便 / 运动 / 体重等信息，多用户通过 **患者代码** 区分。")
 
-# ========= 页面配置 =========
-st.set_page_config(
-    page_title="单人生活方式记录工具（患者端）",
-    page_icon="📝",
-    layout="wide",
-)
+# --------- 患者代码 & 日期 ---------
+st.markdown("### 🧑‍⚕️ 基本信息")
 
-
-st.title("📝 单人生活方式记录工具（患者端）")
-st.caption("用于肥胖 / 脂肪肝患者的饮食、排便、睡眠、运动、体重等日常记录。")
-
-
-# ========= 基本信息 =========
-st.subheader("👤 基本信息")
-
-col_code, col_date = st.columns([2, 1])
-
+col_code, col_date = st.columns(2)
 with col_code:
     patient_code = st.text_input(
-        "患者代码 / 昵称",
-        placeholder="例如：A001，或任意你记得住的代号",
-        help="用于在医生端汇总时区分不同患者。不要填写真实姓名或手机号。",
+        "患者代码（必填，用于区分不同填写者）",
+        placeholder="例如：P001、A01 等",
     )
 
 with col_date:
-    log_date = st.date_input(
-        "记录日期",
-        value=datetime.date.today(),
-        help="默认是今天，如需补记可自行修改。",
-    )
+    today = datetime.date.today()
+    log_date = st.date_input("记录日期", value=today, format="YYYY-MM-DD")
 
-st.markdown("---")
+st.divider()
 
-# ========= 三餐记录 =========
-st.subheader("🍽️ 三餐记录")
-
-st.markdown(
-    "输入示例：`鸡蛋 2，牛奶 1，米饭 1`。可以写得尽量自然，后续可以再精细化。"
-)
+# --------- 三餐记录 ---------
+st.markdown("### 🍽️ 三餐记录")
 
 b_col1, b_col2, b_col3 = st.columns(3)
 with b_col1:
-    breakfast = st.text_area("早餐", height=80, placeholder="例如：燕麦粥 1，鸡蛋 1，牛奶 1")
+    breakfast = st.text_area("早餐", placeholder="例如：鸡蛋 1，牛奶 200ml，面包 1 片")
 with b_col2:
-    lunch = st.text_area("午餐", height=80, placeholder="例如：米饭 1，小炒肉 1，青菜 1")
+    lunch = st.text_area("午餐", placeholder="例如：米饭 1 碗，鸡胸肉 100g，蔬菜")
 with b_col3:
-    dinner = st.text_area("晚餐", height=80, placeholder="例如：米饭 0.5，鱼 1，蔬菜 2")
+    dinner = st.text_area("晚餐", placeholder="例如：粥 1 碗，小菜")
 
-st.markdown("---")
+# --------- 排便 & 睡眠 ---------
+st.markdown("### 🚽 排便 & 😴 睡眠")
 
-# ========= 排便与睡眠 =========
-st.subheader("🚻 排便与睡眠")
-
-c1, c2, c3 = st.columns([1, 2, 1])
-
+c1, c2, c3 = st.columns(3)
 with c1:
     bowel_count = st.number_input(
-        "排便次数 / 天",
+        "排便次数（次 / 天）",
         min_value=0,
         max_value=10,
-        value=1,
         step=1,
+        value=0,
     )
-
 with c2:
+    # 真正的“可选”字段：不做必填校验，允许空字符串
     bowel_status = st.text_input(
         "排便形态（可选）",
-        placeholder="例如：偏干、偏稀、带黏液等，如无可留空",
-        help="此项完全可选，用于更细致了解肠道情况。",
+        placeholder="例如：偏干、偏稀、 Bristol 3-4 等，留空表示不记录",
     )
-
 with c3:
     sleep_hours = st.number_input(
-        "昨晚睡眠时长（小时）",
+        "睡眠时长（小时）",
         min_value=0.0,
         max_value=24.0,
-        value=7.0,
         step=0.5,
+        value=8.0,
     )
 
-st.markdown("---")
+# --------- 运动 & 体重 / BMI ---------
+st.markdown("### 🏃‍♀️ 运动与 ⚖️ 体重 / BMI")
 
-# ========= 运动与体重、BMI =========
-st.subheader("🏃‍♀️ 运动与 BMI")
-
-c4, c5, c6 = st.columns([1, 1, 1])
-
-with c4:
+w1, w2, w3 = st.columns(3)
+with w1:
     sport_minutes = st.number_input(
-        "今天运动时长（分钟，可填 0）",
+        "运动时长（分钟）",
         min_value=0,
         max_value=600,
+        step=10,
         value=0,
-        step=5,
     )
 
-with c5:
-    height_cm = st.number_input(
-        "身高（cm）",
-        min_value=100.0,
-        max_value=250.0,
-        value=165.0,
-        step=0.5,
-        help="用于自动计算 BMI，一般只需首次填写，之后保持不变即可。",
-    )
-
-with c6:
+with w2:
     weight = st.number_input(
         "体重（kg）",
-        min_value=30.0,
-        max_value=200.0,
-        value=60.0,
+        min_value=0.0,
+        max_value=300.0,
         step=0.1,
+        value=60.0,
+        format="%.2f",
     )
 
-# 自动计算 BMI
-if height_cm > 0:
-    bmi_value = weight / ((height_cm / 100) ** 2)
+with w3:
+    height_cm = st.number_input(
+        "身高（cm，仅用于计算 BMI，不会写入数据库）",
+        min_value=0.0,
+        max_value=250.0,
+        step=0.5,
+        value=160.0,
+        format="%.1f",
+    )
+
+# 计算 BMI
+bmi_value = None
+if height_cm > 0 and weight > 0:
+    height_m = height_cm / 100.0
+    bmi_value = round(weight / (height_m * height_m), 2)
 else:
     bmi_value = 0.0
 
-st.metric("自动计算 BMI（kg/m²）", f"{bmi_value:.1f}")
+st.metric("当前 BMI（根据身高 & 体重自动计算）", f"{bmi_value:.2f}")
 
-st.markdown("---")
+st.divider()
 
-# ========= 提交按钮 =========
-st.subheader("✅ 提交记录")
+# -----------------------------
+# 提交
+# -----------------------------
+st.markdown("### ✅ 提交记录")
 
 if st.button("提交今天的记录", type="primary", use_container_width=True):
-    # 基础校验：必须有 patient_code
+    # 简单必填校验
     if not patient_code.strip():
-        st.error("请先填写『患者代码 / 昵称』，以便后续区分不同记录。")
+        st.error("请填写患者代码（用于区分不同填写者）。")
     else:
+        # 处理可选字段：空字符串 -> None，避免数据库里到处是 ""。
+        bowel_status_clean = bowel_status.strip() or None
+
         data = {
+            "log_date": log_date.isoformat(),     # date -> string
             "patient_code": patient_code.strip(),
-            "log_date": str(log_date),  # date -> string
             "breakfast": breakfast.strip() or None,
             "lunch": lunch.strip() or None,
             "dinner": dinner.strip() or None,
-            "bowel_count": int(bowel_count),
-            # 可选字段：为空就存 None
-            "bowel_status": bowel_status.strip() or None,
-            "sleep_hours": float(sleep_hours),
-            "sport_minutes": int(sport_minutes),
-            "weight": float(weight),
-            "BMI": float(round(bmi_value, 2)),
+            "bowel_count": int(bowel_count) if bowel_count is not None else None,
+            "bowel_status": bowel_status_clean,
+            "sleep_hours": float(sleep_hours) if sleep_hours is not None else None,
+            "sport_minutes": int(sport_minutes) if sport_minutes is not None else None,
+            "weight": float(weight) if weight is not None else None,
+            "BMI": float(bmi_value) if not math.isnan(bmi_value) else None,
+            # created_at 由数据库默认值生成即可
         }
 
-        error_msg = insert_daily_record(data)
-        if error_msg is None:
-            st.success("✅ 记录已成功保存！")
+        with st.spinner("正在保存到 Supabase..."):
+            success, message = insert_daily_record(data)
+
+        if success:
+            st.success("记录已成功保存！👍")
+            st.json(message)  # 调试用：可以看到 Supabase 返回的新记录
         else:
             st.error("保存过程中出现错误：")
-            st.code(error_msg, language="text")
-
-# ========= 历史记录预览 =========
-st.markdown("---")
-st.subheader("📊 本人历史记录（仅自己可见，按患者代码区分）")
-
-if patient_code.strip():
-    df_history = load_patient_history(patient_code.strip())
-    if df_history.empty:
-        st.info("当前患者代码下还没有任何记录。提交一条新记录后即可在此查看。")
-    else:
-        # 简单按日期和体重 / BMI 展示
-        show_cols = [
-            "log_date",
-            "breakfast",
-            "lunch",
-            "dinner",
-            "bowel_count",
-            "bowel_status",
-            "sleep_hours",
-            "sport_minutes",
-            "weight",
-            "BMI",
-        ]
-        existing_cols = [c for c in show_cols if c in df_history.columns]
-        st.dataframe(
-            df_history[existing_cols].sort_values("log_date", ascending=False),
-            use_container_width=True,
-            hide_index=True,
-        )
-else:
-    st.info("填写『患者代码 / 昵称』后，可以在这里看到自己的历史记录。")
+            st.code(str(message))
