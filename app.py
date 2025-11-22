@@ -1,5 +1,4 @@
 import math
-import re
 from datetime import date
 
 import streamlit as st
@@ -27,85 +26,33 @@ SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 # ------------------------ 简单菜品热量字典 ------------------------
-# 单位：大致每“份”的热量，实际只是粗略估算
+
 DISH_KCAL = {
-    # 主食
-    "米饭": 150,      # 一小碗
-    "稀饭": 80,
-    "面条": 400,      # 一碗
-    "馒头": 110,      # 一个
-    "包子": 120,      # 一个
-    "面包": 250,      # 一片 / 一小块
-    "汉堡": 500,
-    "披萨": 300,      # 一小块
-
-    # 肉类 / 蛋类
-    "鸡蛋": 80,       # 一个
-    "煎蛋": 120,
-    "荷包蛋": 120,
-    "水煮蛋": 80,
-    "鸡胸肉": 200,    # 一小块
-    "煎鸡胸肉": 250,
-    "牛肉": 200,      # 一小份
-    "排骨": 250,
-    "鸡腿": 220,
-    "鱼": 200,        # 一小份
-    "虾": 150,        # 一小份
-
-    # 套餐 / 混合类
     "泡菜牛肉定食": 750,
     "牛肉饭": 650,
     "咖喱牛肉饭": 800,
     "盖浇饭": 700,
     "炒饭": 650,
     "麻辣香锅": 900,
-
-    # 蔬菜 / 水果
     "沙拉": 150,
-    "炒青菜": 80,
-    "苹果": 80,
-    "香蕉": 100,
-
-    # 饮品 / 乳制品
-    "牛奶": 120,      # 一杯
-    "豆浆": 100,
+    "鸡胸肉": 200,
+    "煎鸡胸肉": 250,
+    "米饭": 150,   # 一小碗
+    "面条": 400,
+    "包子": 120,   # 一个
+    "馒头": 110,
+    "汉堡": 500,
+    "薯条": 350,
+    "牛奶": 120,   # 一杯
     "酸奶": 100,
-    "可乐": 140,      # 一罐
-    "果汁": 150,      # 一杯
+    # 可以根据日常饮食慢慢往这里补充
 }
-
-
-def _estimate_dish(text: str, dish: str, base_kcal: int) -> int:
-    """
-    估算某个 dish 在文本中的热量：
-    - 支持 “2个鸡蛋 / 2份鸡蛋 / 2碗米饭 / 2杯牛奶” 这种写法；
-    - 没有写数量时，且出现了 dish 字样，则按 1 份计算；
-    - 可以出现多次，例如 “早上1个鸡蛋，中午2个鸡蛋”。
-    """
-    total = 0
-
-    # 1) 匹配带数字的写法，如 2个鸡蛋 / 2份鸡蛋 / 2碗米饭 / 2杯牛奶
-    pattern = rf"(\d+)\s*(个|份|碗|杯)?\s*{re.escape(dish)}"
-    for m in re.finditer(pattern, text):
-        qty = int(m.group(1))
-        total += qty * base_kcal
-
-    # 2) 如果完全没数字，只是单独提到很多次，如 “鸡蛋 鸡蛋”
-    #    那就按照 text.count(dish) 份数估算
-    #    但要避免和上面的重复计算：只在“未匹配到数字形式”时再算
-    if total == 0:
-        count_plain = text.count(dish)
-        if count_plain > 0:
-            total += count_plain * base_kcal
-
-    return total
 
 
 def estimate_meal_kcal(meal_text: str) -> int:
     """
     根据文本粗略估算一餐热量：
-    - 逐个菜名查看是否在文本中出现；
-    - 支持“2个鸡蛋 / 2碗米饭”这种乘法；
+    - 只要包含字典中的菜名，就累加对应热量；
     - 一个都没匹配到时返回 0，由患者手动填写。
     """
     text = meal_text.strip()
@@ -115,7 +62,7 @@ def estimate_meal_kcal(meal_text: str) -> int:
     total = 0
     for name, kcal in DISH_KCAL.items():
         if name in text:
-            total += _estimate_dish(text, name, kcal)
+            total += kcal
 
     return total
 
@@ -148,7 +95,7 @@ b1, b2 = st.columns([2, 1])
 with b1:
     breakfast = st.text_area(
         "早餐内容描述",
-        placeholder="例如：2个鸡蛋，一小碗米饭，一杯牛奶",
+        placeholder="例如：泡菜牛肉定食，一小碗米饭，一杯牛奶",
         height=60,
         key="breakfast_text",
         label_visibility="collapsed",
@@ -220,12 +167,9 @@ st.markdown("---")
 
 # ------------------------------ 排便情况 ------------------------------
 
-# ------------------------------ 排便情况 ------------------------------
-
 st.subheader("🚽 排便情况")
 
 col_bc, col_bs = st.columns(2)
-
 with col_bc:
     bowel_count = st.number_input(
         "排便次数（次）",
@@ -236,39 +180,22 @@ with col_bc:
     )
 
 with col_bs:
-    bowel_options = [
-        "未选择",
-        "Bristol 1：颗粒状便，极度便秘",
-        "Bristol 2：香肠形但表面有结块，明显便秘",
-        "Bristol 3：香肠形但表面有轻微裂纹，偏干",
-        "Bristol 4：光滑柔软的香肠形，正常",
-        "Bristol 5：软块状，容易排出",
-        "Bristol 6：糊状、较松散，腹泻前兆",
-        "Bristol 7：完全水样，明显腹泻",
+    bowel_status_options = [
+        "",
+        "Bristol 1：颗粒状，严重便秘",
+        "Bristol 2：条形但很硬，便秘",
+        "Bristol 3：条形但表面有裂纹，偏干",
+        "Bristol 4：条形表面光滑，正常",
+        "Bristol 5：软块状，易排出，略稀",
+        "Bristol 6：糊状，较稀，易急",
+        "Bristol 7：完全是水样，无固体，严重腹泻",
+        "仅少量排气 / 未排便",
     ]
-
-    bowel_choice = st.selectbox(
+    bowel_status = st.selectbox(
         "排便形态（可选）",
-        bowel_options,
+        options=bowel_status_options,
         index=0,
     )
-
-# 如“未选择”则允许用户额外补充输入
-custom_bowel_text = st.text_input(
-    "如需补充说明（可选）",
-    placeholder="例如：轻微腹胀、排便费力、颜色偏深等",
-)
-
-# 最终写入数据库的字段
-bowel_status = None
-if bowel_choice != "未选择":
-    bowel_status = bowel_choice
-if custom_bowel_text.strip():
-    if bowel_status:
-        bowel_status += f"；{custom_bowel_text.strip()}"
-    else:
-        bowel_status = custom_bowel_text.strip()
-
 
 # ---------------------------- 睡眠与压力 ----------------------------
 
@@ -353,18 +280,14 @@ with col_bmi:
 
 st.markdown("---")
 
-# ----------------------------- 提交按钮 -----------------------------
-
-st.markdown("---")
-
 if st.button("✅ 提交今天的记录", type="primary"):
     code = patient_code.strip()
 
     if not code:
-        st.error("请先填写记录代码（向管理者索取）。")
+        st.error("请先填写记录代码（向医生索取）。")
         st.stop()
 
-    # 1) 先检查患者代码是否存在于 patients 表中，防止填错污染别人
+    # 1) 先检查患者代码是否存在于 patients 表中
     try:
         check = (
             supabase.table("patients")
@@ -374,35 +297,15 @@ if st.button("✅ 提交今天的记录", type="primary"):
             .execute()
         )
     except Exception as e:
-        st.error("验证记录代码时出错，请稍后再试或联系管理者。")
+        st.error("验证记录代码时出错，请稍后再试或联系医生。")
         st.code(str(e))
         st.stop()
 
     if not check.data:
-        st.error("记录代码不存在，请确认后再填写。如有疑问请联系管理者。")
+        st.error("记录代码不存在，请确认后再填写。如有疑问请联系医生。")
         st.stop()
 
-    # 2) 再检查：同一记录代码 + 同一天 是否已经有记录
-    try:
-        dup = (
-            supabase.table("daily_records")
-            .select("id")
-            .eq("patient_code", code)
-            .eq("log_date", log_date.isoformat())
-            .limit(1)
-            .execute()
-        )
-    except Exception as e:
-        st.error("检查当天记录时出错，请稍后再试或联系管理者。")
-        st.code(str(e))
-        st.stop()
-
-    if dup.data:
-        # 已经有一条今天的记录了，阻止重复提交
-        st.warning("今天的记录已经提交过了，如需修改请联系管理者在后台协助处理。")
-        st.stop()
-
-    # 3) 通过两重校验后，准备写入 daily_records
+    # 2) 准备写入 / 更新 daily_records
     data = {
         "log_date": log_date.isoformat(),
         "patient_code": code,
@@ -414,7 +317,7 @@ if st.button("✅ 提交今天的记录", type="primary"):
         "dinner_kcal": int(dinner_kcal) if dinner_kcal > 0 else None,
         "total_kcal": int(total_kcal) if total_kcal > 0 else None,
         "bowel_count": int(bowel_count),
-        "bowel_status": bowel_status.strip() or None,
+        "bowel_status": bowel_status or None,
         "sleep_hours": float(sleep_hours),
         "sleep_quality": int(sleep_quality),
         "stress_level": int(stress_level),
@@ -423,13 +326,39 @@ if st.button("✅ 提交今天的记录", type="primary"):
         "BMI": float(round(bmi_value, 2)) if bmi_value > 0 else None,
     }
 
+    # 3) 查看当天是否已有记录：有则 UPDATE，没有则 INSERT
     try:
-        res = supabase.table("daily_records").insert(data).execute()
+        existing = (
+            supabase.table("daily_records")
+            .select("id")
+            .eq("patient_code", code)
+            .eq("log_date", log_date.isoformat())
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        st.error("检查历史记录时出错，请稍后再试。")
+        st.code(str(e))
+        st.stop()
+
+    try:
+        if existing.data:
+            # 更新该条记录
+            record_id = existing.data[0]["id"]
+            res = (
+                supabase.table("daily_records")
+                .update(data)
+                .eq("id", record_id)
+                .execute()
+            )
+            msg = "已更新今天的记录。"
+        else:
+            # 新增记录
+            res = supabase.table("daily_records").insert(data).execute()
+            msg = "已成功提交今天的记录。"
     except Exception as e:
         st.error("保存过程中出现错误：")
         st.code(str(e))
     else:
-        if getattr(res, "data", None):
-            st.success("已成功提交今天的记录，感谢你的配合！")
-        else:
-            st.warning("已尝试提交，但未收到返回数据，可稍后让管理者在后台确认。")
+        st.success(msg + "感谢你的配合！")
+
