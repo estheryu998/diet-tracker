@@ -37,6 +37,8 @@ DISH_KCAL = {
     "沙拉": 150,
     "鸡胸肉": 200,
     "煎鸡胸肉": 250,
+    "鸡蛋": 80,
+    "鸡蛋饼": 150,
     "米饭": 150,   # 一小碗
     "面条": 400,
     "包子": 120,   # 一个
@@ -81,9 +83,9 @@ with st.container():
     with col_code:
         patient_code = st.text_input(
             "记录代码",
-            placeholder="请向管理者索取，例如：A001",
+            placeholder="请向管理者索取，例如：P251122001",
         )
-    st.caption("请务必确认记录代码填写正确，以免影响其他数据。")
+    st.caption("请务必确认记录代码填写正确，以免影响他人数据。")
 
 # ----------------------------- 三餐记录 -----------------------------
 
@@ -95,7 +97,7 @@ b1, b2 = st.columns([2, 1])
 with b1:
     breakfast = st.text_area(
         "早餐内容描述",
-        placeholder="例如：泡菜牛肉定食，一小碗米饭，一杯牛奶",
+        placeholder="例如：鸡蛋 + 一小碗米饭 + 一杯牛奶",
         height=60,
         key="breakfast_text",
         label_visibility="collapsed",
@@ -179,23 +181,40 @@ with col_bc:
         value=0,
     )
 
+BOWEL_OPTIONS = [
+    "未记录/不清楚",
+    "Bristol 1：粒状硬便（严重便秘）",
+    "Bristol 2：香肠状但很硬",
+    "Bristol 3：香肠状表面有裂纹",
+    "Bristol 4：香肠/蛇状，表面光滑柔软（理想便）",
+    "Bristol 5：软块状，边缘清楚",
+    "Bristol 6：糊状，边缘模糊（趋向腹泻）",
+    "Bristol 7：水样便（严重腹泻）",
+    "其他（在下面补充说明）",
+]
+
 with col_bs:
-    bowel_status_options = [
-        "",
-        "Bristol 1：颗粒状，严重便秘",
-        "Bristol 2：条形但很硬，便秘",
-        "Bristol 3：条形但表面有裂纹，偏干",
-        "Bristol 4：条形表面光滑，正常",
-        "Bristol 5：软块状，易排出，略稀",
-        "Bristol 6：糊状，较稀，易急",
-        "Bristol 7：完全是水样，无固体，严重腹泻",
-        "仅少量排气 / 未排便",
-    ]
-    bowel_status = st.selectbox(
+    bowel_choice = st.selectbox(
         "排便形态（可选）",
-        options=bowel_status_options,
+        options=BOWEL_OPTIONS,
         index=0,
     )
+
+bowel_extra = ""
+if bowel_choice == "其他（在下面补充说明）":
+    bowel_extra = st.text_input(
+        "补充说明",
+        placeholder="例如：带少量黏液，轻微腹痛等",
+    )
+
+if bowel_choice == "未记录/不清楚":
+    bowel_status = bowel_extra.strip() or None
+else:
+    # 选择了具体 Bristol 类型
+    if bowel_extra.strip():
+        bowel_status = f"{bowel_choice}；{bowel_extra.strip()}"
+    else:
+        bowel_status = bowel_choice
 
 # ---------------------------- 睡眠与压力 ----------------------------
 
@@ -226,6 +245,16 @@ with col_stress:
         max_value=10,
         value=5,
     )
+
+# ---------------------- 用药 / 保健品情况（新增） ----------------------
+
+st.subheader("💊 用药 / 保健品情况（可选）")
+
+medication = st.text_area(
+    "今天是否服用了药物或保健品？",
+    placeholder="例如：\n早：二甲双胍 0.5 g，1#；\n晚：维生素D 800 IU；\n如无服用可留空。",
+    height=80,
+)
 
 # ------------------------------ 运动情况 ------------------------------
 
@@ -287,7 +316,7 @@ if st.button("✅ 提交今天的记录", type="primary"):
         st.error("请先填写记录代码（向医生索取）。")
         st.stop()
 
-    # 1) 先检查患者代码是否存在于 patients 表中
+    # 1) 先检查记录代码是否存在于 patients 表中，防止填错污染别人
     try:
         check = (
             supabase.table("patients")
@@ -305,7 +334,7 @@ if st.button("✅ 提交今天的记录", type="primary"):
         st.error("记录代码不存在，请确认后再填写。如有疑问请联系医生。")
         st.stop()
 
-    # 2) 准备写入 / 更新 daily_records
+    # 2) 通过校验后，准备写入 / 更新 daily_records
     data = {
         "log_date": log_date.isoformat(),
         "patient_code": code,
@@ -317,49 +346,32 @@ if st.button("✅ 提交今天的记录", type="primary"):
         "dinner_kcal": int(dinner_kcal) if dinner_kcal > 0 else None,
         "total_kcal": int(total_kcal) if total_kcal > 0 else None,
         "bowel_count": int(bowel_count),
-        "bowel_status": bowel_status or None,
+        "bowel_status": bowel_status,
         "sleep_hours": float(sleep_hours),
         "sleep_quality": int(sleep_quality),
         "stress_level": int(stress_level),
         "sport_minutes": int(sport_minutes),
         "weight": float(weight) if weight > 0 else None,
         "BMI": float(round(bmi_value, 2)) if bmi_value > 0 else None,
+        "medication": medication.strip() or None,
     }
 
-    # 3) 查看当天是否已有记录：有则 UPDATE，没有则 INSERT
     try:
-        existing = (
+        # 同一天多次提交时，按 patient_code + log_date 覆盖更新
+        res = (
             supabase.table("daily_records")
-            .select("id")
-            .eq("patient_code", code)
-            .eq("log_date", log_date.isoformat())
-            .limit(1)
+            .upsert(data, on_conflict="patient_code,log_date")
             .execute()
         )
-    except Exception as e:
-        st.error("检查历史记录时出错，请稍后再试。")
-        st.code(str(e))
-        st.stop()
-
-    try:
-        if existing.data:
-            # 更新该条记录
-            record_id = existing.data[0]["id"]
-            res = (
-                supabase.table("daily_records")
-                .update(data)
-                .eq("id", record_id)
-                .execute()
-            )
-            msg = "已更新今天的记录。"
-        else:
-            # 新增记录
-            res = supabase.table("daily_records").insert(data).execute()
-            msg = "已成功提交今天的记录。"
     except Exception as e:
         st.error("保存过程中出现错误：")
         st.code(str(e))
     else:
-        st.success(msg + "感谢你的配合！")
+        if getattr(res, "data", None):
+            st.success("已成功提交今天的记录，感谢你的配合！")
+        else:
+            st.warning("已尝试提交，但未收到返回数据，可稍后让医生在后台确认。")
+
+
 
 
