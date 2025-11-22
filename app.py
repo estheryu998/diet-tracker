@@ -15,7 +15,7 @@ st.set_page_config(
 st.title("📒 生活方式日记（患者端）")
 
 st.caption(
-    "请根据实际情况填写今天的饮食、排便、睡眠、压力、运动及体重、身高信息。"
+    "请根据实际情况填写今天的饮食、排便、睡眠、压力、运动及体重、身高信息。\n"
     "体重 / 身高建议一周记录一次，其余每天一次。"
 )
 
@@ -84,7 +84,6 @@ with st.container():
             placeholder="请向医生索取，例如：A001 / 患者001",
         )
     st.caption("请务必确认患者代码填写正确，以免影响他人数据。")
-
 
 # ----------------------------- 三餐记录 -----------------------------
 
@@ -160,7 +159,7 @@ with d2:
         step=10,
     )
 
-# 今日总热量
+# 今日总热量（会存进数据库）
 total_kcal = breakfast_kcal + lunch_kcal + dinner_kcal
 st.metric("今日总热量（估算）", f"{total_kcal} kcal")
 
@@ -300,6 +299,10 @@ if st.button("✅ 提交今天的记录", type="primary"):
         "breakfast": breakfast.strip() or None,
         "lunch": lunch.strip() or None,
         "dinner": dinner.strip() or None,
+        "breakfast_kcal": int(breakfast_kcal) if breakfast_kcal > 0 else None,
+        "lunch_kcal": int(lunch_kcal) if lunch_kcal > 0 else None,
+        "dinner_kcal": int(dinner_kcal) if dinner_kcal > 0 else None,
+        "total_kcal": int(total_kcal) if total_kcal > 0 else None,
         "bowel_count": int(bowel_count),
         "bowel_status": bowel_status.strip() or None,
         "sleep_hours": float(sleep_hours),
@@ -308,7 +311,6 @@ if st.button("✅ 提交今天的记录", type="primary"):
         "sport_minutes": int(sport_minutes),
         "weight": float(weight) if weight > 0 else None,
         "BMI": float(round(bmi_value, 2)) if bmi_value > 0 else None,
-        # 目前不把 kcal 存数据库，只在前端展示，如需存储可再加字段
     }
 
     try:
@@ -320,5 +322,4 @@ if st.button("✅ 提交今天的记录", type="primary"):
         if getattr(res, "data", None):
             st.success("已成功提交今天的记录，感谢你的配合！")
         else:
-            # 正常情况下也会有 data，没有的话给一个温和提示
             st.warning("已尝试提交，但未收到返回数据，可稍后让医生在后台确认。")
