@@ -154,17 +154,20 @@ with tab_codes:
         )
         selected_patient = patients[selected_index]
 
-        new_remark = st.text_input(
-            "备注 / 真实姓名：",
-            value=selected_patient.get("remark") or "",
-            key=f"remark_input_{selected_patient['id']}",
-        )
+        selected_patient_code = st.selectbox(
+    "选择已有患者代码",
+    patients_df["patient_code"] if not patients_df.empty else [],
+)
 
-        col_save, col_delete = st.columns(2)
-        with col_save:
-            if st.button("💾 保存备注", key=f"save_remark_{selected_patient['id']}"):
-                update_patient_remark(selected_patient["id"], new_remark.strip())
-                st.success("备注已更新。可稍后刷新页面查看最新结果。")
+new_remark = st.text_input("备注内容（患者真实姓名等）")
+
+if st.button("保存备注", disabled=patients_df.empty):
+    try:
+        update_patient_remark(selected_patient_code, new_remark.strip())
+        st.success("已保存备注")
+    except Exception as e:
+        st.error(f"保存备注失败：{e}")
+
 
         with col_delete:
             if st.button("🗑️ 删除该患者代码", type="secondary"):
