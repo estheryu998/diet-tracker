@@ -38,11 +38,128 @@ with st.form("daily_form"):
     # ===========================
     # 1. 三餐记录
     # ===========================
-    st.markdown("### 🍽 三餐记录")
+st.subheader("🍱 三餐记录")
 
-    breakfast = st.text_area("早餐", placeholder="例如：燕麦 + 鸡蛋 + 牛奶")
-    lunch = st.text_area("午餐", placeholder="例如：米饭 + 鱼 + 青菜")
-    dinner = st.text_area("晚餐", placeholder="例如：少油少盐，清淡为主")
+# 为了在点击按钮后保留上次估算结果，用 session_state 存一下
+for key in ["breakfast_kcal", "lunch_kcal", "dinner_kcal"]:
+    if key not in st.session_state:
+        st.session_state[key] = 0
+
+# 早餐
+st.markdown("**早餐**")
+b1, b2 = st.columns([2, 1])
+with b1:
+    breakfast = st.text_area(
+        "早餐内容描述",
+        placeholder="例如：泡菜牛肉定食，一小碗米饭，一杯牛奶",
+        height=60,
+        key="breakfast_text",
+        label_visibility="collapsed",  # 不重复显示标签
+    )
+with b2:
+    if st.button("自动估算早餐热量", key="btn_breakfast"):
+        st.session_state["breakfast_kcal"] = estimate_meal_kcal(breakfast)
+    breakfast_kcal = st.number_input(
+        "早餐估算热量 (kcal)",
+        min_value=0,
+        max_value=5000,
+        value=int(st.session_state["breakfast_kcal"]),
+        step=10,
+    )
+
+st.markdown("---")
+
+# 午餐
+st.markdown("**午餐**")
+l1, l2 = st.columns([2, 1])
+with l1:
+    lunch = st.text_area(
+        "午餐内容描述",
+        placeholder="例如：咖喱牛肉饭，一杯酸奶",
+        height=60,
+        key="lunch_text",
+        label_visibility="collapsed",
+    )
+with l2:
+    if st.button("自动估算午餐热量", key="btn_lunch"):
+        st.session_state["lunch_kcal"] = estimate_meal_kcal(lunch)
+    lunch_kcal = st.number_input(
+        "午餐估算热量 (kcal)",
+        min_value=0,
+        max_value=5000,
+        value=int(st.session_state["lunch_kcal"]),
+        step=10,
+    )
+
+st.markdown("---")
+
+# 晚餐
+st.markdown("**晚餐**")
+d1, d2 = st.columns([2, 1])
+with d1:
+    dinner = st.text_area(
+        "晚餐内容描述",
+        placeholder="例如：少油少盐的炒菜 + 米饭",
+        height=60,
+        key="dinner_text",
+        label_visibility="collapsed",
+    )
+with d2:
+    if st.button("自动估算晚餐热量", key="btn_dinner"):
+        st.session_state["dinner_kcal"] = estimate_meal_kcal(dinner)
+    dinner_kcal = st.number_input(
+        "晚餐估算热量 (kcal)",
+        min_value=0,
+        max_value=5000,
+        value=int(st.session_state["dinner_kcal"]),
+        step=10,
+    )
+
+# 今日总热量
+total_kcal = breakfast_kcal + lunch_kcal + dinner_kcal
+st.metric("今日总热量（估算）", f"{total_kcal} kcal")
+st.markdown("---")
+
+
+    # 一些常见菜品的估算热量（大致值，方便使用时慢慢补充）
+DISH_KCAL = {
+    "泡菜牛肉定食": 750,
+    "牛肉饭": 650,
+    "咖喱牛肉饭": 800,
+    "盖浇饭": 700,
+    "炒饭": 650,
+    "麻辣香锅": 900,
+    "沙拉": 150,
+    "鸡胸肉": 200,
+    "煎鸡胸肉": 250,
+    "米饭": 150,   # 一小碗
+    "面条": 400,
+    "包子": 120,   # 一个
+    "馒头": 110,
+    "汉堡": 500,
+    "薯条": 350,
+    "牛奶": 120,   # 一杯
+    "酸奶": 100,
+    # 你可以慢慢往里加：比如你常见的日式定食、韩式套餐、外卖品种等
+}
+
+def estimate_meal_kcal(meal_text: str) -> int:
+    """
+    根据菜名字符串粗略估算热量：
+    - 如果包含“泡菜牛肉定食”这种完整词，给出对应热量；
+    - 如果包含多个已知菜名，会累加；
+    - 如果一个都没匹配到，返回 0，让患者自己填。
+    """
+    text = meal_text.strip()
+    if not text:
+        return 0
+
+    total = 0
+    for name, kcal in DISH_KCAL.items():
+        if name in text:
+            total += kcal
+
+    return total
 
     # ===========================
     # 2. 排便情况（单独一块）
@@ -161,31 +278,38 @@ def insert_daily_record(payload: dict):
         raise RuntimeError(f"Supabase insert failed (status {status})")
     return response
 
-if submitted:
-    if not patient_code.strip():
-        st.error("请填写患者代码。")
-    else:
-        data = {
-            "log_date": log_date.isoformat(),
-            "patient_code": patient_code.strip(),
-            "breakfast": breakfast,
-            "lunch": lunch,
-            "dinner": dinner,
-            "bowel_count": int(bowel_count),
-            "bowel_status": bowel_status or None,
-            "sleep_hours": float(sleep_hours),
-            "sleep_quality": int(sleep_quality),
-            "stress_level": int(stress_level),
-            "sport_minutes": int(sport_minutes),
-            "weight": weight,          # 可能为 None
-            "height": height,          # 可能为 None（cm）
-            "BMI": bmi_value,          # 可能为 None
-        }
+if st.button("提交今天的记录", type="primary"):
+    code = patient_code.strip()
+    if not code:
+        st.error("请先填写患者代码（向医生索取）。")
+        st.stop()
 
-        try:
-            insert_daily_record(data)
-        except Exception as e:
-            st.error("保存过程中出现错误：")
-            st.code(str(e))
+    # ✅ 1. 先去 patients 表检查这个代码是否存在
+    check = (
+        supabase.table("patients")
+        .select("id")
+        .eq("patient_code", code)
+        .limit(1)
+        .execute()
+    )
+    if not check.data:
+        st.error("患者代码不存在，请确认后再填写。如有疑问请联系医生。")
+        st.stop()
+
+    # ✅ 2. 通过校验后再构造 data 写入 daily_records
+    data = {
+        "log_date": log_date.isoformat(),
+        "patient_code": code,
+        # … 其他字段 …
+    }
+
+    try:
+        res = supabase.table("daily_records").insert(data).execute()
+    except Exception as e:
+        st.error("保存过程中出现错误：")
+        st.code(str(e))
+    else:
+        if getattr(res, "data", None):
+            st.success("已成功提交今天的记录，感谢你的配合！")
         else:
-            st.success("已成功提交今天的记录，感谢配合！")
+            st.warning("好像没有返回数据，请稍后在医生端确认是否写入成功。")
