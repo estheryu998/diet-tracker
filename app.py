@@ -81,7 +81,7 @@ with st.container():
     with col_code:
         patient_code = st.text_input(
             "填写代码",
-            placeholder="请向医生索取，例如：A001 / 患者001",
+            placeholder="由管理者提供，例如：A001 / 患者001",
         )
     st.caption("请务必确认自己的代码填写正确，以免影响其他数据。")
 
@@ -179,11 +179,25 @@ with col_bc:
         value=0,
     )
 with col_bs:
-    bowel_status = st.text_input(
+    # 改成真正“可选”的下拉菜单
+    bowel_options = [
+        "不填写",
+        "Bristol 1：块状硬便",
+        "Bristol 2：结块便",
+        "Bristol 3：稍成形",
+        "Bristol 4：条状软便（理想）",
+        "Bristol 5：软团便",
+        "Bristol 6：糊状便",
+        "Bristol 7：水样便",
+        "其他",
+    ]
+    bowel_status_display = st.selectbox(
         "排便形态（可选）",
-        placeholder="例如：Bristol 3-4，便形正常，无明显不适",
+        options=bowel_options,
+        index=0,
+        help="如果不想填写可以保持“ 不填写 ”。",
     )
-
+    bowel_status = None if bowel_status_display == "不填写" else bowel_status_display
 # ---------------------------- 睡眠与压力 ----------------------------
 
 st.subheader("😴 睡眠与压力")
@@ -323,5 +337,6 @@ if st.button("✅ 提交今天的记录", type="primary"):
             st.success("已成功提交今天的记录，感谢你的配合！")
         else:
             st.warning("已尝试提交，但未收到返回数据，可稍后让医生在后台确认。")
+
 
 
