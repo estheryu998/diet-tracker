@@ -1,6 +1,6 @@
 import random
 import string
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from io import StringIO
 
 import pandas as pd
@@ -30,7 +30,7 @@ def get_patients():
 
 def create_patient(remark: str):
     """生成一个新的 patient_code 并保存到 patients 表"""
-    # 循环确保不重复（概率很小，但保险一点）
+    # 保险一点，确保不重复
     while True:
         code = generate_patient_code()
         exists = (
@@ -53,6 +53,7 @@ def update_patient_remark(patient_id: int, remark: str):
 
 
 def delete_patient(patient_id: int):
+    """只删除 patients 表记录，不删除 daily_records 里的历史数据"""
     supabase.table("patients").delete().eq("id", patient_id).execute()
 
 
@@ -61,12 +62,26 @@ def patients_to_csv(patients: list[dict]) -> bytes:
     if not patients:
         return b""
     df = pd.DataFrame(patients)
-    # 按你习惯的列顺序
     cols = ["id", "patient_code", "remark", "created_at"]
     df = df[[c for c in cols if c in df.columns]]
     csv_buffer = StringIO()
     df.to_csv(csv_buffer, index=False)
-    return csv_buffer.getvalue().encode("utf-8-sig")  # utf-8 带 BOM，Excel 也能识别中文
+    return csv_buffer.getvalue().encode("utf-8-sig")  # Excel 也能识别中文
+
+
+def get_daily_records(patient_code: str, start: date | None, end: date | None):
+    """按患者代码 + 日期范围获取 daily_records"""
+    query = (
+        supabase.table("daily_records")
+        .select("*")
+        .eq("patient_code", patient_code)
+    )
+    if start:
+        query = query.gte("log_date", start.isoformat())
+    if end:
+        query = query.lte("log_date", end.isoformat())
+    res = query.order("log_date", desc=False).execute()
+    return res.data or []
 
 
 # ============ Streamlit UI ============
@@ -79,7 +94,7 @@ st.set_page_config(
 
 st.title("🩺 生活方式日记 · 医生端 Dashboard")
 
-tab_codes, tab_records = st.tabs(["患者代码管理", "（预留）患者记录浏览"])
+tab_codes, tab_records = st.tabs(["患者代码管理", "患者记录浏览"])
 
 # -------------------------------------------------------------------
 # Tab 1 : 患者代码管理
@@ -107,7 +122,6 @@ with tab_codes:
         st.info("目前还没有创建任何患者代码。")
     else:
         df_patients = pd.DataFrame(patients)
-        # 美化显示的列
         show_cols = ["id", "patient_code", "remark", "created_at"]
         df_show = df_patients[show_cols]
         st.dataframe(
@@ -133,7 +147,11 @@ with tab_codes:
             f"{row['patient_code']}  |  {row.get('remark') or '（无备注）'}"
             for row in patients
         ]
-        selected_index = st.selectbox("选择要编辑的患者代码：", range(len(patients)), format_func=lambda i: options[i])
+        selected_index = st.selectbox(
+            "选择要编辑的患者代码：",
+            range(len(patients)),
+            format_func=lambda i: options[i],
+        )
         selected_patient = patients[selected_index]
 
         new_remark = st.text_input(
@@ -146,21 +164,124 @@ with tab_codes:
         with col_save:
             if st.button("💾 保存备注", key=f"save_remark_{selected_patient['id']}"):
                 update_patient_remark(selected_patient["id"], new_remark.strip())
-                st.success("备注已更新。请稍后刷新页面查看最新结果。")
+                st.success("备注已更新。可稍后刷新页面查看最新结果。")
 
         with col_delete:
-            # 删除需要再确认，防止误操作
             if st.button("🗑️ 删除该患者代码", type="secondary"):
-                if st.checkbox("我确认要删除该患者代码（不会删除已填写的历史记录）", key="confirm_delete"):
+                if st.checkbox(
+                    "我确认要删除该患者代码（不会删除已填写的历史记录）",
+                    key="confirm_delete",
+                ):
                     delete_patient(selected_patient["id"])
                     st.warning("患者代码已删除。请刷新页面以查看最新列表。")
                 else:
-                    st.info("请先勾选确认复选框再删除。")
+                    st.info("请先勾选上面的确认复选框再进行删除。")
 
 
 # -------------------------------------------------------------------
-# Tab 2 : 患者记录浏览（预留）
+# Tab 2 : 患者记录浏览
 # -------------------------------------------------------------------
 with tab_records:
-    st.info("这里可以以后再扩展：按患者代码 / 日期范围查看饮食、睡眠、排便等记录。当前先专注于患者代码管理。")
+    st.subheader("📊 按患者代码 / 日期范围查看记录")
+
+    patients = get_patients()
+    if not patients:
+        st.info("目前还没有任何患者代码，请先在『患者代码管理』里创建。")
+    else:
+        # 选择患者代码
+        options = [
+            f"{row['patient_code']}  |  {row.get('remark') or '（无备注）'}"
+            for row in patients
+        ]
+        idx = st.selectbox(
+            "选择患者代码：",
+            range(len(patients)),
+            format_func=lambda i: options[i],
+        )
+        selected_patient = patients[idx]
+        selected_code = selected_patient["patient_code"]
+
+        # 日期范围（默认最近 14 天）
+        today = date.today()
+        default_start = today - timedelta(days=14)
+        date_range = st.date_input(
+            "选择日期范围：",
+            value=(default_start, today),
+        )
+
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_date, end_date = date_range
+        else:
+            start_date = date_range
+            end_date = date_range
+
+        if st.button("🔍 加载记录", type="primary"):
+            records = get_daily_records(selected_code, start_date, end_date)
+
+            if not records:
+                st.info("该患者在所选日期范围内暂无记录。")
+            else:
+                df = pd.DataFrame(records)
+
+                # 转成日期类型 & 排序
+                if "log_date" in df.columns:
+                    df["log_date"] = pd.to_datetime(df["log_date"]).dt.date
+                    df = df.sort_values("log_date")
+
+                st.markdown("#### 📄 详细记录列表")
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+                # 方便画图：以 log_date 为索引
+                if "log_date" in df.columns:
+                    df_plot = df.set_index("log_date")
+                else:
+                    df_plot = df.copy()
+
+                st.markdown("#### 📈 关键指标趋势")
+
+                # 能画什么画什么，字段不存在就跳过
+                if "total_kcal" in df_plot.columns:
+                    st.line_chart(
+                        df_plot["total_kcal"],
+                        height=200,
+                    )
+                    st.caption("每日总热量（kcal）")
+
+                cols1 = st.columns(2)
+
+                with cols1[0]:
+                    if "sleep_hours" in df_plot.columns:
+                        st.line_chart(df_plot["sleep_hours"], height=200)
+                        st.caption("睡眠时长（小时）")
+
+                    if "bowel_count" in df_plot.columns:
+                        st.line_chart(df_plot["bowel_count"], height=200)
+                        st.caption("排便次数")
+
+                with cols1[1]:
+                    if "sleep_quality" in df_plot.columns:
+                        st.line_chart(df_plot["sleep_quality"], height=200)
+                        st.caption("睡眠质量（1–10）")
+
+                    if "stress_level" in df_plot.columns:
+                        st.line_chart(df_plot["stress_level"], height=200)
+                        st.caption("压力（1–10）")
+
+                cols2 = st.columns(2)
+                with cols2[0]:
+                    if "sport_minutes" in df_plot.columns:
+                        st.line_chart(df_plot["sport_minutes"], height=200)
+                        st.caption("运动时长（分钟）")
+
+                with cols2[1]:
+                    if "weight" in df_plot.columns:
+                        st.line_chart(df_plot["weight"], height=200)
+                        st.caption("体重（kg）")
+
+                    if "BMI" in df_plot.columns:
+                        st.line_chart(df_plot["BMI"], height=200)
+                        st.caption("BMI")
+
+                st.success("记录和曲线已加载完毕。")
+
 
