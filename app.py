@@ -25,53 +25,83 @@ SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-# ------------------------ 简单菜品热量字典 ------------------------
+# ======================
+# 简单中文/英文食物热量表（kcal / 份）
+# ======================
+FOOD_CALORIE_DB = {
+    # 基础食物
+    "鸡蛋": 80,
+    "煎蛋": 120,
+    "水煮蛋": 80,
+    "荷包蛋": 100,
+    "蛋黄": 55,
+    "蛋白": 20,
 
-DISH_KCAL = {
+    "米饭": 230,      # 一碗
+    "粥": 150,        # 一碗
+    "馒头": 240,      # 一个
+    "面条": 300,      # 一碗
+    "炒面": 450,      # 一份
+    "面包": 260,      # 两片
+
+    "牛肉": 250,      # 一小份
+    "猪肉": 260,
+    "鸡肉": 220,
+    "鱼": 200,
+    "三文鱼": 250,
+
+    "蔬菜": 50,       # 一份
+    "沙拉": 150,      # 带少量调料
+    "水果": 60,       # 一份
+    "苹果": 80,
+    "香蕉": 100,
+    "酸奶": 120,      # 一杯
+
+    # 套餐 / 菜名示例
     "泡菜牛肉定食": 750,
-    "牛肉饭": 650,
-    "咖喱牛肉饭": 800,
-    "盖浇饭": 700,
-    "炒饭": 650,
-    "麻辣香锅": 900,
-    "沙拉": 150,
-    "鸡胸肉": 200,
-    "煎鸡胸肉": 250,
-    "米饭": 150,   # 一小碗
-    "面条": 400,
-    "包子": 120,   # 一个
-    "馒头": 110,
+    "牛肉盖饭": 700,
+    "咖喱鸡饭": 800,
+    "盖浇饭": 650,
     "汉堡": 500,
     "薯条": 350,
-    "牛奶": 120,   # 一杯
-    "酸奶": 100,
-    # 可以根据日常饮食慢慢往这里补充
+    "披萨": 280,     # 一块
+
+    # 一些英文兜底
+    "egg": 80,
+    "rice": 230,
+    "beef": 250,
+    "pork": 260,
+    "chicken": 220,
+    "salad": 150,
+    "yogurt": 120,
 }
 
 
-def estimate_meal_kcal(meal_text: str) -> int:
+def estimate_calories(meal_text: str) -> int:
     """
-    根据文本粗略估算一餐热量：
-    - 只要包含字典中的菜名，就累加对应热量；
-    - 一个都没匹配到时返回 0，由患者手动填写。
+    根据简单的关键字 + 数量 来估算卡路里。
+    支持「2个鸡蛋」「一碗米饭」「泡菜牛肉定食」这种写法。
+    一份记录里出现多种食物时会自动累加。
     """
-    text = meal_text.strip()
-    if not text:
+    if not meal_text:
         return 0
 
+    text = meal_text.lower().replace(" ", "")
     total = 0
-    for name, kcal in DISH_KCAL.items():
+
+    for name, kcal in FOOD_CALORIE_DB.items():
         if name in text:
-            total += kcal
+            # 匹配前面的数量，如：2个鸡蛋 / 1份泡菜牛肉定食
+            pattern = rf"(\d+)\s*(个|份|块|只|碗|盘|杯)?{re.escape(name)}"
+            m = re.search(pattern, text)
+            if m:
+                qty = int(m.group(1))
+            else:
+                qty = 1
 
-    return total
+            total += qty * kcal
 
-
-# 为了在点击按钮后保留估算结果，用 session_state 记录
-for key in ["breakfast_kcal", "lunch_kcal", "dinner_kcal"]:
-    if key not in st.session_state:
-        st.session_state[key] = 0
-
+    return int(total)
 # ------------------------ 基本信息：日期 & 患者代码 ------------------------
 
 with st.container():
@@ -337,6 +367,7 @@ if st.button("✅ 提交今天的记录", type="primary"):
             st.success("已成功提交今天的记录，感谢你的配合！")
         else:
             st.warning("已尝试提交，但未收到返回数据，可稍后让医生在后台确认。")
+
 
 
 
