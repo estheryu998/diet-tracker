@@ -81,7 +81,7 @@ with st.container():
     with col_code:
         patient_code = st.text_input(
             "填写代码",
-            placeholder="由管理者提供，例如：A001 / 患者001",
+            placeholder="由管理者提供，例如：A001",
         )
     st.caption("请务必确认自己的代码填写正确，以免影响其他数据。")
 
@@ -337,6 +337,7 @@ if st.button("✅ 提交今天的记录", type="primary"):
             st.success("已成功提交今天的记录，感谢你的配合！")
         else:
             st.warning("已尝试提交，但未收到返回数据，可稍后让医生在后台确认。")
+
 
 
 
